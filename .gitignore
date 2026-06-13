@@ -22,6 +22,11 @@ release/
 *.zip
 *.asar
 
+# Flutter
+redew_mobile/build/
+redew_mobile/.dart_tool/
+redew_mobile/android/.gradle/
+redew_mobile/android/local.properties
 # Local Data
 shakky_music.db
 downloads/
