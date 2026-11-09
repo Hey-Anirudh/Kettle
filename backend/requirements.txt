@@ -1,6 +1,7 @@
 asyncpg>=0.29
 fastapi
 uvicorn
+websockets>=13.0
 sqlalchemy
 aiosqlite
 greenlet
