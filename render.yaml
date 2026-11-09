@@ -1,6 +1,6 @@
-# Render Blueprint — deploy the Kettle backend + a free Postgres database.
+# Render Blueprint â€” deploy the Kettle backend + a free Postgres database.
 # In Render: New > Blueprint > connect this repo. The dashboard asks you to
-# paste the two "sync: false" secrets (Spotify) — nothing else to set.
+# paste the two "sync: false" secrets (Spotify) â€” nothing else to set.
 # SECRET_KEY is auto-generated; DATABASE_URL is wired to the Postgres instance.
 services:
   - type: web
