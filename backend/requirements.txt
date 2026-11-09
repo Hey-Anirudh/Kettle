@@ -1,17 +1,16 @@
+asyncpg>=0.29
 fastapi
 uvicorn
 sqlalchemy
 aiosqlite
+greenlet
 python-jose[cryptography]
 passlib[bcrypt]
 python-dotenv
 httpx
 python-multipart
-google-auth
-google-api-python-client
-yt-dlp
-pyrogram
-tgcrypto
-asyncio
+# yt-dlp >= 2026.8.19 is REQUIRED: stable's old android_vr stream URLs are
+# capped at ~1 MiB by gvs (403 on any range past it); 2026.8.19+ routes to the
+# uncapped visionos client. Do not pin older.
+yt-dlp>=2026.8.19
 spotipy
-furl

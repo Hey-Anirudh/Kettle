@@ -1,0 +1,23 @@
+{
+  "skill_name": "code-generator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have a design document for a GenAI-based customer feedback analysis system. The system should: (1) Accept raw customer review text as input, (2) Use an LLM to classify the sentiment as Positive, Negative, or Neutral, (3) Summarize the key issues or praise mentioned, (4) Output a structured JSON result with sentiment, summary, and key themes. Generate a complete Python project from this design. It's a GenAI solution (direct LLM calls, not agentic).",
+      "expected_output": "A .zip file containing a Python project with: config.py for LLM provider config, llm_client.py, a pipeline or main module that handles sentiment classification and summarization, requirements.txt, .env.example, and README.md",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Please generate Python code from this solution design: I need an agentic AI market research assistant. The system has two agents: a Researcher who searches for market data and trends about a given industry topic, and a Report Writer who takes the researcher's findings and writes a professional market brief. It should be a CrewAI project. There is only one crew. The output is a markdown report file.",
+      "expected_output": "A .zip file with a CrewAI project: crew.py using @CrewBase decorator, config/agents.yaml with researcher and report_writer agents, config/tasks.yaml with research and writing tasks, main.py, requirements.txt, .env.example, README.md",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Here is my solution design for an agentic AI content production pipeline. It has three distinct crews that must run in sequence: (1) Research Crew - a researcher and fact-checker who gather information on a given topic, (2) Writing Crew - a content strategist and copywriter who draft the article based on research, (3) Editorial Crew - an editor and SEO specialist who review and optimize the final content. The output is a polished article. Build this as a CrewAI project with Flows since there are multiple crews.",
+      "expected_output": "A .zip file with a multi-crew CrewAI project: flow.py with Flow class using @start/@listen decorators, Pydantic state model, three crew subdirectories each with crew.py and agents.yaml/tasks.yaml, main.py that kicks off the flow, requirements.txt, .env.example, README.md",
+      "files": []
+    }
+  ]
+}

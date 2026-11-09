@@ -14,7 +14,7 @@ export default {
     {
       name: '@electron-forge/maker-squirrel',
       config: {
-        name: 'redew',
+        name: 'kettle',
         setupIcon: './icon.ico'
       },
     },

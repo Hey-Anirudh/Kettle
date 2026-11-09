@@ -1,10 +1,9 @@
 import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
+import { API_BASE, WS_BASE } from '../config';
 
 const MusicContext = createContext();
 
 export const useMusic = () => useContext(MusicContext);
-
-const API_BASE = 'http://localhost:8000';
 
 export const MusicProvider = ({ children }) => {
   const [currentTrack, setCurrentTrack] = useState(null);
@@ -19,7 +18,11 @@ export const MusicProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [likedSongs, setLikedSongs] = useState(new Set());
   const [showQueue, setShowQueue] = useState(false);
-  const [recentTracks, setRecentTracks] = useState([]);
+  const [recentTracks, setRecentTracks] = useState(() => {
+    // Survive restarts so "Continue Listening" always has data
+    try { return JSON.parse(localStorage.getItem('kettle_recent')) || []; }
+    catch { return []; }
+  });
   
   // Room (Jam) State
   const [currentRoom, setCurrentRoom] = useState(null);
@@ -32,18 +35,28 @@ export const MusicProvider = ({ children }) => {
   const wsRef = useRef(null);
   const isSyncingRef = useRef(false);
   
-  const audioRef = useRef(new Audio());
+  const audioRef = useRef(null);
+  if (!audioRef.current) audioRef.current = new Audio(); // allocate once, not per render
   const queueRef = useRef(queue);
   const currentTrackRef = useRef(currentTrack);
   const repeatRef = useRef(repeat);
   const shuffleRef = useRef(shuffle);
   const recentIdsRef = useRef(new Set()); // Track recently played to avoid loops
+  const restoredTrackRef = useRef(false); // Restore runs once per session, not per user-object change
+  const upNextRef = useRef(null); // { forId, pick, pool } precomputed next track
 
   // Keep refs in sync
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
   useEffect(() => { repeatRef.current = repeat; }, [repeat]);
   useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
+
+  // Persist play history for the Continue Listening list (localStorage copy;
+  // the backend /users/listen copy is fetched on launch for cross-session use)
+  useEffect(() => {
+    try { localStorage.setItem('kettle_recent', JSON.stringify(recentTracks.slice(0, 20))); }
+    catch { /* quota/corruption must never break playback */ }
+  }, [recentTracks]);
 
   const broadcastRoomState = useCallback((type, data) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -60,11 +73,13 @@ export const MusicProvider = ({ children }) => {
     const audio = audioRef.current;
     
     const updateProgress = () => setProgress(audio.currentTime);
-    const updateDuration = () => setDuration(audio.duration || 0);
+    // Number.isFinite guards against Infinity (streams without duration
+    // metadata would render "Infinity:NaN" and break click-to-seek)
+    const updateDuration = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const handleEnded = () => {
       if (repeatRef.current === 'one') {
         audio.currentTime = 0;
-        audio.play();
+        audio.play().catch(() => {});
       } else {
         handleNextTrack();
       }
@@ -102,17 +117,27 @@ export const MusicProvider = ({ children }) => {
         setQueue(user.current_queue);
       }
       
-      // Restore track if possible
-      if (state.track_id && !currentTrack) {
+      // Restore track if possible (once per token — a user-object identity
+      // change like a profile save must not reload the old track)
+      if (state.track_id && !currentTrack && !restoredTrackRef.current) {
+        restoredTrackRef.current = true;
         // We'd need to fetch the track details or have them in the state
         // For now, let's assume the queue contains it
         const track = user.current_queue?.find(t => t.id === state.track_id);
         if (track) {
           setCurrentTrack(track);
           // Set progress but don't auto-play to avoid browser blocks
-          audioRef.current.src = `${API_BASE}/stream?v=${track.id}`;
-          audioRef.current.currentTime = state.progress || 0;
-          setProgress(state.progress || 0);
+          const audio = audioRef.current;
+          const resumeAt = state.progress || 0;
+          audio.src = `${API_BASE}/stream/${track.id}?title=${encodeURIComponent(track.title || '')}`;
+          setProgress(resumeAt);
+          // Seeking before metadata is loaded is dropped by the browser —
+          // wait for loadedmetadata, but only once
+          const seekWhenReady = () => {
+            try { audio.currentTime = resumeAt; } catch { /* stream rejected seek */ }
+            audio.removeEventListener('loadedmetadata', seekWhenReady);
+          };
+          audio.addEventListener('loadedmetadata', seekWhenReady);
         }
       }
     }
@@ -159,31 +184,77 @@ export const MusicProvider = ({ children }) => {
     return () => clearTimeout(syncTimerRef.current);
   }, [queue, currentTrack, volume, shuffle, repeat, isPlaying, syncState]);
 
-  const playTrack = useCallback(async (track, queueList = null, startTime = 0) => {
+  // Compute the next recommended track WHILE the current one plays and warm its
+  // stream URL on the backend, so Skip / natural track-end starts instantly.
+  const prepareNext = useCallback(async (track) => {
+    if (!track) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/recommendations?title=${encodeURIComponent(track.title)}&channel=${encodeURIComponent(track.channel || '')}&current_id=${track.id}`
+      );
+      const data = await res.json();
+      if (data.results?.length > 0) {
+        const fresh = data.results.filter(t => !recentIdsRef.current.has(t.id));
+        const pool = fresh.length > 0 ? fresh : data.results;
+        const pick = pool[Math.floor(Math.random() * Math.min(5, pool.length))];
+        upNextRef.current = { forId: track.id, pick, pool };
+        // Warm the backend's stream-URL cache for the pick
+        fetch(`${API_BASE}/prefetch/${pick.id}`).catch(() => {});
+      }
+    } catch (e) {
+      // Best-effort: handleNextTrack re-fetches on demand if this failed
+    }
+  }, []);
+
+  const playTrack = useCallback(async (track, queueList = null, startTime = 0, fromRemote = false) => {
+    // Guard: empty playlist / empty search results pass undefined here
+    if (!track || !track.id) return;
     if (currentTrackRef.current?.id === track.id && !queueList && startTime === 0) {
       togglePlay();
       return;
     }
-    
+
     if (queueList) {
       setQueue(queueList);
+      // Warm the NEXT queued track so the queue advances instantly
+      const idx = queueList.findIndex(t => t.id === track.id);
+      const nextUp = idx >= 0 ? (queueList[idx + 1] || (repeatRef.current === 'all' ? queueList[0] : null)) : null;
+      if (nextUp && nextUp.id !== track.id) fetch(`${API_BASE}/prefetch/${nextUp.id}`).catch(() => {});
     }
-    
+
     // Add to recent list
     setRecentTracks(prev => {
       const filtered = prev.filter(t => t.id !== track.id);
       return [track, ...filtered].slice(0, 20);
     });
-    
+    // Remember played ids so recommendations never repeat tracks (max 200 tracked)
+    recentIdsRef.current.add(track.id);
+    if (recentIdsRef.current.size > 200) recentIdsRef.current.clear();
+
     setCurrentTrack(track);
     setIsScraping(true);
-    
+
+    // Record the play server-side (Continue Listening + taste engine).
+    // Fire-and-forget: history must never delay or break playback.
+    const histToken = localStorage.getItem('token');
+    if (histToken) {
+      fetch(`${API_BASE}/users/listen`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${histToken}` },
+        body: JSON.stringify({
+          id: track.id, title: track.title, channel: track.channel,
+          thumbnail: track.thumbnail, duration: track.duration
+        })
+      }).catch(() => {});
+    }
+
     const streamUrl = `${API_BASE}/stream-live/${track.id}`;
     const audio = audioRef.current;
 
     const onPlayStart = () => {
       setIsScraping(false);
       setIsPlaying(true);
+      prepareNext(track); // fire-and-forget: precompute the next track
     };
 
     audio.src = streamUrl;
@@ -192,27 +263,30 @@ export const MusicProvider = ({ children }) => {
     try {
       await audio.play();
       onPlayStart();
-      if (!isSyncingRef.current) broadcastRoomState('SYNC_PLAY', { track, progress: audio.currentTime, sentAt: Date.now() });
+      // fromRemote: this play was CAUSED by the room — never echo it back
+      // (the timed isSyncingRef window was too short for slow stream starts)
+      if (!fromRemote && !isSyncingRef.current) broadcastRoomState('SYNC_PLAY', { track, progress: audio.currentTime, sentAt: Date.now() });
     } catch (err) {
       console.warn("Live stream failed, trying fallback...", err);
-      const token = localStorage.getItem('token');
-      const headers = token ? `&token=${token}` : '';
       audio.src = `${API_BASE}/stream/${track.id}?title=${encodeURIComponent(track.title)}`;
+      if (startTime > 0) audio.currentTime = startTime; // re-apply seek lost by the src switch
       try {
         await audio.play();
         onPlayStart();
+        // Fallback success must notify the room too, or members silently desync
+        if (!fromRemote && !isSyncingRef.current) broadcastRoomState('SYNC_PLAY', { track, progress: audio.currentTime, sentAt: Date.now() });
       } catch (e) {
         console.error("Playback failed completely", e);
         setIsScraping(false);
       }
     }
-  }, [broadcastRoomState]);
+  }, [broadcastRoomState, prepareNext]);
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
     if (!audio.src) return;
     if (audio.paused) {
-      audio.play();
+      audio.play().catch(() => {}); // guard: may reject if src is blocked
       if (!isSyncingRef.current) broadcastRoomState('SYNC_PLAY', { track: currentTrackRef.current, progress: audio.currentTime, sentAt: Date.now() });
     } else {
       audio.pause();
@@ -226,7 +300,18 @@ export const MusicProvider = ({ children }) => {
     if (!ct) return;
 
     // Repeat one is handled in the 'ended' event listener
-    
+
+    // Shuffle: jump to a random track from the queue
+    if (shuffleRef.current && q.length > 1) {
+      let idx = Math.floor(Math.random() * q.length);
+      let guard = 0;
+      while (q[idx].id === ct.id && guard++ < 10) idx = Math.floor(Math.random() * q.length);
+      if (q[idx].id !== ct.id) {
+        playTrack(q[idx], q);
+        return;
+      }
+    }
+
     // If repeat all, go back to start of queue
     if (repeatRef.current === 'all' && q.length > 0) {
       const currentIndex = q.findIndex(t => t.id === ct.id);
@@ -234,8 +319,20 @@ export const MusicProvider = ({ children }) => {
       playTrack(q[nextIndex], q);
       return;
     }
-    
-    // Always fetch recommendations based on current song's vibe
+
+    // Pre-computed recommendation from when this track started = instant skip
+    const pre = upNextRef.current;
+    if (pre && pre.forId === ct.id && pre.pool && pre.pool.length > 0) {
+      upNextRef.current = null;
+      const fresh = pre.pool.filter(t => !recentIdsRef.current.has(t.id));
+      const pool = fresh.length > 0 ? fresh : pre.pool;
+      const stillFresh = pool.some(t => t.id === pre.pick?.id);
+      const pick = stillFresh ? pre.pick : pool[Math.floor(Math.random() * Math.min(5, pool.length))];
+      playTrack(pick, pool);
+      return;
+    }
+
+    // Fallback: fetch recommendations now based on current song's vibe
     try {
       const res = await fetch(
         `${API_BASE}/recommendations?title=${encodeURIComponent(ct.title)}&channel=${encodeURIComponent(ct.channel)}&current_id=${ct.id}`
@@ -245,11 +342,15 @@ export const MusicProvider = ({ children }) => {
         // Filter out recently played tracks
         const freshResults = data.results.filter(t => !recentIdsRef.current.has(t.id));
         const finalPool = freshResults.length > 0 ? freshResults : data.results;
-        
+
         // Pick one for variety
         const pick = finalPool[Math.floor(Math.random() * Math.min(5, finalPool.length))];
         playTrack(pick, finalPool);
+        return;
       }
+      // No recommendations returned: advance the queue if there is one
+      const qi = q.findIndex(t => t.id === ct.id);
+      if (qi >= 0 && qi < q.length - 1) playTrack(q[qi + 1], q);
     } catch (err) {
       console.error("Failed to fetch recommendations", err);
       // Fallback: play next in queue if recommendations fail
@@ -339,7 +440,7 @@ export const MusicProvider = ({ children }) => {
     } catch (e) { console.error("Failed to fetch room info", e); }
 
     const username = user?.username || "Guest";
-    const ws = new WebSocket(`ws://localhost:8000/ws/room/${roomCode}?username=${encodeURIComponent(username)}`);
+    const ws = new WebSocket(`${WS_BASE}/ws/room/${roomCode}?username=${encodeURIComponent(username)}`);
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
@@ -363,6 +464,7 @@ export const MusicProvider = ({ children }) => {
           setRoomParticipants(prev => prev.filter(u => u !== msg.username));
           break;
         case 'SYNC_PLAY':
+          if (!msg.track || !msg.track.id) break; // malformed peer message
           const now = Date.now();
           const latency = msg.sentAt ? (now - msg.sentAt) / 1000 : 0;
           const targetTime = msg.progress + latency;
@@ -374,12 +476,12 @@ export const MusicProvider = ({ children }) => {
           const drift = Math.abs(audioRef.current.currentTime - targetTime);
           
           if (isDifferentTrack) {
-            playTrack(msg.track, null, targetTime);
+            playTrack(msg.track, null, targetTime, true); // fromRemote: no echo
           } else if (drift > 2) {
             audioRef.current.currentTime = targetTime;
           }
           
-          if (audioRef.current.paused) audioRef.current.play();
+          if (audioRef.current.paused) audioRef.current.play().catch(() => {});
           setTimeout(() => { isSyncingRef.current = false; }, 200);
           break;
         case 'SYNC_PAUSE':
@@ -403,6 +505,16 @@ export const MusicProvider = ({ children }) => {
         case 'SYNC_SETTINGS':
           setRoomSettings(msg.settings);
           break;
+      }
+    };
+
+    // If the server drops the connection, clear ghost room state
+    ws.onclose = () => {
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+        setCurrentRoom(null);
+        setRoomParticipants([]);
+        setIsRoomHost(false);
       }
     };
 
@@ -529,12 +641,24 @@ export const MusicProvider = ({ children }) => {
         artist: currentTrack.channel,
         artwork: [{ src: currentTrack.thumbnail, sizes: '512x512', type: 'image/jpeg' }]
       });
-      navigator.mediaSession.setActionHandler('play', togglePlay);
-      navigator.mediaSession.setActionHandler('pause', togglePlay);
+      // Idempotent handlers: an explicit OS "play" must never pause and
+      // vice versa (togglePlay breaks when events arrive out of order)
+      navigator.mediaSession.setActionHandler('play', () => {
+        const a = audioRef.current;
+        if (a && a.paused) {
+          a.play().catch(() => {});
+          if (!isSyncingRef.current && currentTrackRef.current) {
+            broadcastRoomState('SYNC_PLAY', { track: currentTrackRef.current, progress: a.currentTime, sentAt: Date.now() });
+          }
+        }
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        audioRef.current?.pause();
+      });
       navigator.mediaSession.setActionHandler('nexttrack', handleNextTrack);
       navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
     }
-  }, [currentTrack, togglePlay, handleNextTrack, prevTrack]);
+  }, [currentTrack, handleNextTrack, prevTrack, broadcastRoomState]);
 
   const value = {
     currentTrack, playTrack, isPlaying, togglePlay, 
@@ -546,7 +670,8 @@ export const MusicProvider = ({ children }) => {
     playlists, fetchPlaylists, createPlaylist, addToPlaylist,
     recentTracks, setRecentTracks,
     currentRoom, joinRoom, leaveRoom,
-    roomParticipants, isRoomHost, roomSettings, updateRoomSettings
+    roomParticipants, isRoomHost, roomSettings, updateRoomSettings,
+    audioRef
   };
 
   return <MusicContext.Provider value={value}>{children}</MusicContext.Provider>;

@@ -23,6 +23,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
     frame: true,
     icon: path.join(__dirname, 'icon.ico'),
@@ -30,11 +31,13 @@ function createWindow() {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   });
 
-  const url = isDev 
-    ? 'http://localhost:5173' 
-    : `file://${path.join(__dirname, 'dist/index.html')}`;
-  
-  mainWindow.loadURL(url);
+  // loadFile handles spaces/backslashes in install paths (e.g. "Redew Music")
+  // and asar paths — a hand-built file:// URL breaks on both
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173');
+  } else {
+    mainWindow.loadFile(path.join(__dirname, 'dist/index.html'));
+  }
 
   // Fake Origin and Referer for YouTube iframes to bypass Error 150/153
   const { session } = require('electron');
@@ -60,17 +63,51 @@ function createWindow() {
 
 function killExistingBackend() {
   return new Promise((resolve) => {
-    if (process.platform === 'win32') {
-      exec(`FOR /F "tokens=5" %a IN ('netstat -aon ^| findstr :8000') DO taskkill /F /PID %a /T`, () => resolve());
-    } else {
-      exec(`lsof -i :8000 -t | xargs kill -9`, () => resolve());
+    if (process.platform !== 'win32') {
+      // Only kill OUR backend (python/uvicorn) — never an unrelated app
+      // that happens to hold port 8000
+      exec(`lsof -i :8000 -t | xargs -r ps -p -o comm= 2>/dev/null`, () => {
+        exec(`for pid in $(lsof -i :8000 -t); do comm=$(ps -p $pid -o comm=); case "$comm" in *python*|*backend*|*uvicorn*) kill -9 $pid;; esac; done`, () => resolve());
+      });
+      return;
     }
+    exec('netstat -aon', (err, stdout) => {
+      if (err || !stdout) return resolve();
+      const pids = new Set();
+      stdout.split(/\r?\n/).forEach(line => {
+        const parts = line.trim().split(/\s+/);
+        // e.g. TCP  0.0.0.0:8000  0.0.0.0:0  LISTENING  12345
+        if (parts.length >= 5 && /:8000$/.test(parts[1]) && parts[3] === 'LISTENING') {
+          pids.add(parts[4]);
+        }
+      });
+      if (pids.size === 0) return resolve();
+      let pending = pids.size;
+      const done = () => { if (--pending === 0) resolve(); };
+      pids.forEach(pid => {
+        // Only kill OUR backend (python/uvicorn/packaged exe) — never other apps
+        exec(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, (e2, out) => {
+          const name = (out || '').toLowerCase();
+          if (name.includes('python') || name.includes('backend.exe') || name.includes('uvicorn')) {
+            exec(`taskkill /F /PID ${pid} /T`, done);
+          } else {
+            console.log(`Port 8000 held by unrelated process (pid ${pid}); leaving it alone.`);
+            done();
+          }
+        });
+      });
+    });
   });
 }
 
-function waitForBackend() {
+function waitForBackend(timeoutMs = 30000) {
   return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
     const check = () => {
+      if (Date.now() > deadline) {
+        console.warn('Backend did not come up in time; opening window anyway.');
+        return resolve();
+      }
       const socket = new net.Socket();
       socket.setTimeout(1000);
       socket.on('connect', () => {
@@ -103,7 +140,8 @@ function startBackend() {
   } else {
     // In production, backend.exe is bundled in resources
     backendPath = path.join(process.resourcesPath, 'backend.exe');
-    backendCwd = process.resourcesPath;
+    // Use writable userData dir for CWD so sub-processes or relative files never crash on Program Files permissions
+    backendCwd = app.getPath('userData');
 
     // The .env should already be in resources due to extraResources in package.json
     const envInResources = path.join(process.resourcesPath, '.env');
@@ -115,7 +153,11 @@ function startBackend() {
       if (fs.existsSync(envNextToExe)) {
         try {
           fs.copyFileSync(envNextToExe, envInResources);
-        } catch (e) {}
+        } catch (e) {
+          // Program Files is read-only — log it so the missing-ENV failure
+          // is diagnosable instead of silent
+          console.error(`Failed to copy .env into resources (likely read-only install dir): ${e.message}`);
+        }
       }
     }
   }
@@ -148,6 +190,15 @@ function startBackend() {
   backendProcess.on('exit', (code) => {
     console.log(`Backend exited with code: ${code}`);
     logStream.write(`[EXIT] ${new Date().toISOString()}: Exit code ${code}\n`);
+    logStream.end(); // close the fd — it was leaked before
+    if (code !== 0 && code !== null) {
+      // Surface the dead backend instead of failing silently forever
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.executeJavaScript(
+          `console.error('Backend process died (code ${code}). See backend_log.txt.')`
+        ).catch(() => {});
+      }
+    }
   });
   } catch (err) {
     console.error(`Failed to spawn backend: ${err.message}`);
@@ -157,6 +208,17 @@ function startBackend() {
 // IPC handler: open URL in system browser (for Google OAuth)
 ipcMain.handle('open-external', (event, url) => {
   return shell.openExternal(url);
+});
+
+// Second launch focuses the first instance instead of killing its backend
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
 });
 
 app.on('ready', async () => {
@@ -206,5 +268,9 @@ autoUpdater.on('update-downloaded', () => {
 });
 
 ipcMain.on('restart_app', () => {
-  autoUpdater.quitAndInstall();
+  try {
+    autoUpdater.quitAndInstall();
+  } catch (e) {
+    console.warn('Updater is a placeholder in this build:', e.message);
+  }
 });

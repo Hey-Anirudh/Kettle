@@ -1,11 +1,7 @@
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-
+/// App configuration for standalone (no-backend) mode.
+/// Configuration values are now compile-time constants since there's no backend.
 class AppConfig {
-  static String get apiBaseUrl {
-    return dotenv.env['API_BASE_URL'] ?? 'http://10.0.2.2:8000';
-  }
-
-  static String get wsBaseUrl {
-    return apiBaseUrl.replaceFirst('http://', 'ws://').replaceFirst('https://', 'wss://');
-  }
+  /// No backend URL is needed — the app runs fully offline/on-device.
+  static const String apiBaseUrl = '';
+  static const String wsBaseUrl = '';
 }

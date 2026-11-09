@@ -6,7 +6,7 @@ class Playlist {
   final String? description;
   final String? image;
   final String? type;
-  final List<Song>? songs;
+  List<Song>? songs; // mutable to allow adding songs
 
   Playlist({
     this.id,

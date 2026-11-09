@@ -125,12 +125,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   onTap: () => _searchAndPlay(music, 'punjabi songs 2026'),
                 ),
 
-                const SizedBox(height: 80), // space for player bar
+                const SizedBox(height: 80),
               ],
             ),
           ),
-          // Mini player at bottom
-          bottomSheet: music.currentTrack != null ? _MiniPlayer(music: music) : null,
         );
       },
     );
@@ -159,20 +157,20 @@ class _HomeScreenState extends State<HomeScreen> {
               radius: 32,
               backgroundColor: const Color(0xFFE60000),
               child: Text(
-                (auth.user?.username ?? 'G')[0].toUpperCase(),
+                auth.username[0].toUpperCase(),
                 style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
               ),
             ),
             const SizedBox(height: 12),
-            Text(auth.user?.username ?? 'Guest', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-            Text(auth.user?.email ?? '', style: TextStyle(color: Colors.grey[400])),
+            Text(auth.username, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            Text('Local Mode', style: TextStyle(color: Colors.grey[400])),
             const SizedBox(height: 24),
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: () {
+                onPressed: () async {
                   Navigator.pop(ctx);
-                  auth.logout();
+                  await auth.logout();
                 },
                 icon: const Icon(Icons.logout, color: Colors.red),
                 label: const Text('Log out', style: TextStyle(color: Colors.red)),
@@ -283,230 +281,4 @@ class _QuickPickCard extends StatelessWidget {
   }
 }
 
-class _MiniPlayer extends StatelessWidget {
-  final MusicProvider music;
 
-  const _MiniPlayer({required this.music});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => _showFullPlayer(context),
-      child: Container(
-        height: 64,
-        decoration: const BoxDecoration(
-          color: Color(0xFF1E1E1E),
-          border: Border(top: BorderSide(color: Color(0xFF282828))),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: Image.network(
-                music.currentTrack!.thumbnail,
-                width: 48,
-                height: 48,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  width: 48, height: 48,
-                  color: Colors.grey[800],
-                  child: const Icon(Icons.music_note, size: 24, color: Colors.grey),
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    music.currentTrack!.title.split('|')[0].trim(),
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    music.currentTrack!.channel,
-                    style: TextStyle(fontSize: 11, color: Colors.grey[400]),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              icon: Icon(
-                music.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                color: const Color(0xFFE60000),
-                size: 32,
-              ),
-              onPressed: () => music.togglePlay(),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showFullPlayer(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ChangeNotifierProvider.value(
-          value: music,
-          child: const _FullPlayerScreen(),
-        ),
-      ),
-    );
-  }
-}
-
-class _FullPlayerScreen extends StatelessWidget {
-  const _FullPlayerScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<MusicProvider>(
-      builder: (context, music, _) {
-        return Scaffold(
-          backgroundColor: const Color(0xFF0A0A0A),
-          appBar: AppBar(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            leading: IconButton(
-              icon: const Icon(Icons.keyboard_arrow_down),
-              onPressed: () => Navigator.pop(context),
-            ),
-          ),
-          body: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              children: [
-                // Album Art
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.network(
-                    music.currentTrack?.thumbnail ?? '',
-                    height: 300,
-                    width: 300,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Container(
-                      height: 300, width: 300,
-                      color: Colors.grey[800],
-                      child: const Icon(Icons.music_note, size: 80, color: Colors.grey),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 32),
-
-                // Track info
-                Text(
-                  music.currentTrack?.title.split('|')[0].trim() ?? '',
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  music.currentTrack?.channel ?? '',
-                  style: TextStyle(fontSize: 16, color: Colors.grey[400]),
-                ),
-                const SizedBox(height: 32),
-
-                // Progress bar
-                Row(
-                  children: [
-                    Text(_formatDuration(music.position), style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                    Expanded(
-                      child: SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          activeTrackColor: const Color(0xFFE60000),
-                          inactiveTrackColor: const Color(0xFF282828),
-                          thumbColor: const Color(0xFFE60000),
-                          overlayColor: const Color(0x29E60000),
-                        ),
-                        child: Slider(
-                          value: music.duration.inSeconds > 0
-                              ? music.position.inSeconds / music.duration.inSeconds
-                              : 0,
-                          onChanged: (v) => music.seek(Duration(seconds: (v * music.duration.inSeconds).round())),
-                        ),
-                      ),
-                    ),
-                    Text(_formatDuration(music.duration), style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  ],
-                ),
-                const SizedBox(height: 16),
-
-                // Controls
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    IconButton(
-                      icon: Icon(Icons.shuffle, color: music.isShuffled ? const Color(0xFFE60000) : Colors.grey),
-                      onPressed: music.toggleShuffle,
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.skip_previous, color: Colors.white, size: 32),
-                      onPressed: music.previous,
-                    ),
-                    Container(
-                      decoration: const BoxDecoration(
-                        color: Color(0xFFE60000),
-                        shape: BoxShape.circle,
-                      ),
-                      child: IconButton(
-                        icon: Icon(music.isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white, size: 36),
-                        onPressed: music.togglePlay,
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.skip_next, color: Colors.white, size: 32),
-                      onPressed: music.next,
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.repeat, color: music.repeatMode != 'none' ? const Color(0xFFE60000) : Colors.grey),
-                      onPressed: music.cycleRepeat,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 32),
-
-                // Volume
-                Row(
-                  children: [
-                    const Icon(Icons.volume_down, color: Colors.grey, size: 18),
-                    Expanded(
-                      child: SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          activeTrackColor: Colors.grey,
-                          inactiveTrackColor: const Color(0xFF282828),
-                          thumbColor: Colors.white,
-                          overlayColor: const Color(0x29FFFFFF),
-                        ),
-                        child: Slider(
-                          value: music.volume,
-                          onChanged: music.setVolume,
-                        ),
-                      ),
-                    ),
-                    const Icon(Icons.volume_up, color: Colors.grey, size: 18),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  String _formatDuration(Duration d) {
-    final minutes = d.inMinutes.remainder(60);
-    final seconds = d.inSeconds.remainder(60);
-    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-  }
-}

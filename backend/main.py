@@ -6,28 +6,32 @@ import passlib.handlers.pbkdf2
 import passlib.handlers.bcrypt
 import passlib.handlers.sha2_crypt
 
-from fastapi import FastAPI, HTTPException, Query, Depends, status, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, Depends, status, WebSocket, WebSocketDisconnect, UploadFile, File, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
-from google.oauth2 import id_token
-from google.auth.transport import requests
-
 from music_engine import MusicEngine
 from database import init_db, get_db
-from models import User, Song, Playlist, LikedSong, ListenHistory, Room, RoomParticipant
-from auth import get_password_hash, verify_password, create_access_token, get_current_user, oauth2_scheme
+from models import User, Song, Playlist, LikedSong, ListenHistory, Room, RoomParticipant, SearchHistory
+from auth import (
+    get_password_hash, verify_password, create_access_token,
+    get_current_user, oauth2_scheme, oauth2_scheme_optional,
+    SECRET_KEY, ALGORITHM,
+)
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from jose import JWTError, jwt
 
-import httpx
+import asyncio
+import time
+from datetime import datetime, timedelta
 
 load_dotenv()
 
-app = FastAPI(title="Redew API")
+app = FastAPI(title="Kettle API")
 
 # Enable CORS
 app.add_middleware(
@@ -39,12 +43,8 @@ app.add_middleware(
 
 # Engine initialization
 engine_config = {
-    "SESSION_STRING": os.getenv("SESSION_STRING"),
-    "API_ID": os.getenv("API_ID"),
-    "API_HASH": os.getenv("API_HASH"),
     "SPOTIFY_CLIENT_ID": os.getenv("SPOTIFY_CLIENT_ID"),
     "SPOTIFY_CLIENT_SECRET": os.getenv("SPOTIFY_CLIENT_SECRET"),
-    "DATABASE_CHANNEL_ID": os.getenv("DATABASE_CHANNEL_ID"),
 }
 music_engine = MusicEngine(engine_config)
 
@@ -74,11 +74,8 @@ class LikeRequest(BaseModel):
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
-SECRET_KEY = os.getenv("SECRET_KEY", "prod_secret_key_change_this")
-ALGORITHM = "HS256"
-
-async def get_optional_user(token: Optional[str] = Depends(oauth2_scheme)):
-    """Returns username if authenticated, None otherwise"""
+async def get_optional_user(token: Optional[str] = Depends(oauth2_scheme_optional)):
+    """Returns username if authenticated, None otherwise (never 401s)"""
     if not token:
         return None
     try:
@@ -86,11 +83,6 @@ async def get_optional_user(token: Optional[str] = Depends(oauth2_scheme)):
         return payload.get("sub")
     except JWTError:
         return None
-
-@app.on_event("startup")
-async def startup():
-    await init_db()
-    await music_engine.initialize()
 
 # --- AUTH ROUTES ---
 
@@ -100,6 +92,10 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).filter(User.username == user.username))
     if result.scalars().first():
         raise HTTPException(status_code=400, detail="Username already registered")
+    # Email also has a unique DB index — pre-check to return 400 instead of 500
+    email_result = await db.execute(select(User).filter(User.email == user.email))
+    if email_result.scalars().first():
+        raise HTTPException(status_code=400, detail="Email already registered")
     
     db_user = User(
         username=user.username,
@@ -107,7 +103,12 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
         hashed_password=get_password_hash(user.password)
     )
     db.add(db_user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Race with a concurrent registration hitting the same unique index
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Username or email already registered")
     return {"message": "User created successfully"}
 
 @app.post("/login", response_model=Token)
@@ -170,16 +171,156 @@ async def sync_state(data: SyncState, username: str = Depends(get_current_user),
     return {"status": "synced"}
 
 @app.post("/users/search-history")
-async def add_search_history(query: str = Query(...), username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def add_search_history(q: Optional[str] = Query(None, alias="q"),
+                             query: Optional[str] = Query(None),
+                             username: str = Depends(get_current_user),
+                             db: AsyncSession = Depends(get_db)):
+    # The frontend posts `?q=...`; accept both spellings so it never 422s.
+    text = (q or query or "").strip()
+    if not text:
+        return {"status": "ignored"}
+    text = text[:300]
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    history = SearchHistory(user_id=user.id, query=query)
+
+    history = SearchHistory(user_id=user.id, query=text)
     db.add(history)
     await db.commit()
     return {"status": "recorded"}
+
+
+def _parse_duration(raw):
+    """'3:45' / '1:02:03' / '225' -> seconds (or None)."""
+    try:
+        if raw is None or raw == "":
+            return None
+        parts = str(raw).strip().split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        return int(parts[0])
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_duration(secs):
+    if not secs:
+        return "0:00"
+    secs = int(secs)
+    return f"{secs // 60}:{secs % 60:02d}"
+
+
+class ListenIn(BaseModel):
+    # Frontend track shape (MusicContext playTrack)
+    id: str
+    title: str
+    channel: Optional[str] = None
+    thumbnail: Optional[str] = None
+    duration: Optional[str] = None
+
+
+@app.post("/users/listen")
+async def record_listen(data: ListenIn, username: str = Depends(get_current_user),
+                        db: AsyncSession = Depends(get_db)):
+    """Record a play — feeds Continue Listening and the per-user taste engine."""
+    result = await db.execute(select(User).filter(User.username == username))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    song_result = await db.execute(select(Song).filter(Song.video_id == data.id))
+    song = song_result.scalars().first()
+    if not song:
+        song = Song(video_id=data.id, title=data.title, artist=data.channel,
+                    thumbnail=data.thumbnail, duration=_parse_duration(data.duration))
+        db.add(song)
+        await db.commit()
+        await db.refresh(song)
+    else:
+        # Backfill metadata for songs first created by the stream/like paths
+        changed = False
+        if data.title and not song.title:
+            song.title = data.title; changed = True
+        if data.channel and not song.artist:
+            song.artist = data.channel; changed = True
+        if data.thumbnail and not song.thumbnail:
+            song.thumbnail = data.thumbnail; changed = True
+        if song.duration is None and _parse_duration(data.duration):
+            song.duration = _parse_duration(data.duration); changed = True
+        if changed:
+            await db.commit()
+
+    # One history row per song per 60s (browser re-requests / src restarts)
+    recent_cutoff = datetime.utcnow() - timedelta(seconds=60)
+    dup = await db.execute(
+        select(ListenHistory)
+        .filter(ListenHistory.user_id == user.id, ListenHistory.song_id == song.id,
+                ListenHistory.played_at >= recent_cutoff)
+        .limit(1)
+    )
+    if dup.scalars().first() is None:
+        song.play_count = (song.play_count or 0) + 1
+        db.add(ListenHistory(user_id=user.id, song_id=song.id))
+        await db.commit()
+    return {"status": "recorded"}
+
+
+@app.get("/users/listen-history")
+async def get_listen_history(limit: int = Query(30, ge=1, le=100),
+                             username: str = Depends(get_current_user),
+                             db: AsyncSession = Depends(get_db)):
+    """Most recent distinct plays for the Continue Listening list."""
+    result = await db.execute(select(User).filter(User.username == username))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    rows = (await db.execute(
+        select(ListenHistory, Song)
+        .join(Song, ListenHistory.song_id == Song.id)
+        .filter(ListenHistory.user_id == user.id)
+        .order_by(ListenHistory.played_at.desc())
+        .limit(limit * 3)   # dedupe in python, then cut to limit
+    )).all()
+
+    seen, tracks = set(), []
+    for _, song in rows:
+        if not song.video_id or song.video_id in seen:
+            continue
+        seen.add(song.video_id)
+        tracks.append({
+            "id": song.video_id,
+            "title": song.title or "",
+            "channel": song.artist or "Unknown",
+            "thumbnail": song.thumbnail or "",
+            "duration": _fmt_duration(song.duration),
+        })
+        if len(tracks) >= limit:
+            break
+    return {"tracks": tracks}
+
+
+@app.get("/users/search-history")
+async def get_search_history(limit: int = Query(30, ge=1, le=100),
+                             username: str = Depends(get_current_user),
+                             db: AsyncSession = Depends(get_db)):
+    """Recent search queries — a core signal for per-user personalization."""
+    result = await db.execute(select(User).filter(User.username == username))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    rows = (await db.execute(
+        select(SearchHistory.query)
+        .filter(SearchHistory.user_id == user.id)
+        .order_by(SearchHistory.searched_at.desc())
+        .limit(limit)
+    )).scalars().all()
+    return {"queries": [q for q in rows if q]}
+
 
 class UserProfileUpdate(BaseModel):
     username: Optional[str] = None
@@ -209,69 +350,44 @@ async def update_profile(data: UserProfileUpdate, username: str = Depends(get_cu
     await db.commit()
     return {"message": "Profile updated", "username": user.username, "email": user.email, "profile_photo": user.profile_photo}
 
-class GoogleDirectAuth(BaseModel):
-    email: str
-    name: str
-
-@app.post("/google-login-direct")
-async def google_login_direct(auth: GoogleDirectAuth, db: AsyncSession = Depends(get_db)):
-    email = auth.email
-    name = auth.name
-    
-    # Check if user exists
-    result = await db.execute(select(User).filter(User.email == email))
-    user = result.scalars().first()
-    
-    if not user:
-        # Check if username is taken, append random if so
-        uname_check = await db.execute(select(User).filter(User.username == name))
-        if uname_check.scalars().first():
-            import random
-            name = f"{name}{random.randint(1000, 9999)}"
-        
-        user = User(
-            username=name,
-            email=email,
-            hashed_password=get_password_hash(f"google_user_{email}")
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-
-    access_token = create_access_token(data={"sub": user.username})
-    return {
-        "access_token": access_token, 
-        "token_type": "bearer", 
-        "username": user.username,
-        "id": user.id,
-        "profile_photo": user.profile_photo
-    }
 @app.post("/upload-to-catbox")
 async def upload_proxy(file: UploadFile = File(...)):
+    MAX_UPLOAD = 200 * 1024 * 1024  # Catbox's own limit; also caps memory use
+    payload = await file.read()
+    if len(payload) > MAX_UPLOAD:
+        raise HTTPException(status_code=413, detail="File too large")
     try:
-        async with httpx.AsyncClient() as client:
-            files = {'fileToUpload': (file.filename, await file.read(), file.content_type)}
+        async with httpx.AsyncClient(timeout=60) as client:
+            files = {'fileToUpload': (file.filename, payload, file.content_type)}
             data = {'reqtype': 'fileupload'}
             response = await client.post('https://catbox.moe/user/api.php', data=data, files=files)
             
             if response.status_code != 200:
-                raise HTTPException(status_code=500, detail="Catbox upload failed")
+                raise HTTPException(status_code=502, detail="Catbox upload failed")
             
             return {"url": response.text.strip()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        # Don't re-wrap our own deliberate status codes
+        raise
+    except Exception:
+        # Generic message only — raw httpx errors leak host/proxy internals
+        raise HTTPException(status_code=502, detail="Catbox upload failed")
+
+@app.get("/health")
+async def health():
+    """Liveness probe for Render/load balancers and local tooling."""
+    return {"status": "ok", "service": "kettle-api"}
 
 # --- MUSIC ROUTES ---
 
 @app.get("/search")
 async def search(q: str = Query(...), db: AsyncSession = Depends(get_db)):
-    # 1. Check local DB first for fast indexed retrieval
-    db_results = await db.execute(select(Song).filter(Song.title.ilike(f"%{q}%")).limit(5))
+    # Local DB lookup and YouTube search run concurrently for minimum latency
+    db_task = db.execute(select(Song).filter(Song.title.ilike(f"%{q}%")).limit(5))
+    yt_task = music_engine.search(q, limit=15)
+    db_results, yt_results = await asyncio.gather(db_task, yt_task)
     local_songs = db_results.scalars().all()
-    
-    # 2. Get from YouTube engine
-    yt_results = await music_engine.search(q, limit=15)
-    
+
     return {
         "local": local_songs,
         "results": yt_results[:15]
@@ -315,18 +431,66 @@ async def recommendations(title: str = Query(...), channel: str = Query(...), cu
     return {"results": []}
 
 @app.get("/stream-live/{video_id}")
-async def stream_live(video_id: str):
-    """Zero-delay HLS Streaming Redirect"""
-    stream_url = await music_engine.get_stream_url(video_id)
-    if not stream_url:
+async def stream_live(video_id: str, request: Request):
+    """Relay the googlevideo audio stream to the player.
+
+    We can't redirect the <audio> element to googlevideo directly: it always
+    sends an open-ended `Range: bytes=0-`, which many edges/networks answer
+    with 403. Instead the backend translates the browser's Range into small
+    CLOSED in-bounds chunks (verified to return 206 everywhere) and streams
+    them through, with automatic re-extraction if the URL expires.
+    """
+    total, ctype = await music_engine.probe_media(video_id)
+    if not total:
         raise HTTPException(status_code=404, detail="Live stream not found")
-    # Instead of downloading, we redirect the browser to the direct audio source
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url=stream_url)
+
+    # Parse the browser's Range header (usually `bytes=0-`, or `bytes=N-` on seek)
+    start, end = 0, total - 1
+    rng = (request.headers.get("range") or "").strip()
+    if rng.startswith("bytes="):
+        spec = rng[6:].split(",")[0].strip()
+        s, _, e = spec.partition("-")
+        try:
+            if s:
+                start = int(s)
+                if e:
+                    end = min(int(e), total - 1)
+            elif e:
+                # Suffix range: bytes=-N (last N bytes)
+                start = max(0, total - int(e))
+        except ValueError:
+            pass
+
+    if start >= total or start > end:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+        "Cache-Control": "no-store",
+    }
+    if start > 0 or end < total - 1:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+
+    generator = music_engine.relay_chunks(video_id, start, end)
+    return StreamingResponse(
+        generator,
+        status_code=206 if (start > 0 or end < total - 1) else 200,
+        media_type=ctype or "audio/webm",
+        headers=headers,
+    )
+
+@app.get("/prefetch/{video_id}")
+async def prefetch(video_id: str):
+    """Warm the stream-URL cache for a track so playback starts instantly."""
+    url = await music_engine.get_stream_url(video_id)
+    return {"status": "warmed" if url else "failed", "video_id": video_id}
 
 @app.get("/stream/{video_id}")
-async def stream(video_id: str, title: str = None, username: str = Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
-    # Track listen history if user is authenticated
+async def stream(video_id: str, title: str = None, request: Request = None, username: str = Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    # Record listen history ONLY when the stream is actually served, so
+    # failed streams and browser re-requests don't inflate play counts.
+    # Dedupe: multiple GETs for one playback within 60s count once.
     if username:
         result = await db.execute(select(User).filter(User.username == username))
         user = result.scalars().first()
@@ -342,15 +506,110 @@ async def stream(video_id: str, title: str = None, username: str = Depends(get_o
             await db.refresh(song)
         
         if song and user:
-            history = ListenHistory(user_id=user.id, song_id=song.id)
-            song.play_count += 1
-            db.add(history)
-            await db.commit()
+            recent_cutoff = datetime.utcnow() - timedelta(seconds=60)
+            dup = await db.execute(
+                select(ListenHistory)
+                .filter(ListenHistory.user_id == user.id, ListenHistory.song_id == song.id,
+                        ListenHistory.played_at >= recent_cutoff)
+                .limit(1)
+            )
+            if dup.scalars().first() is None:
+                history = ListenHistory(user_id=user.id, song_id=song.id)
+                song.play_count += 1
+                db.add(history)
+                await db.commit()
 
-    file_path = await music_engine.get_audio_path(video_id, title)
-    if not file_path or not os.path.exists(file_path):
+    # Local cached file first (instant, no network)...
+    file_path = os.path.join(music_engine.download_folder, f"{video_id}.mp3")
+    if os.path.exists(file_path):
+        media_type = "audio/mpeg"
+        if file_path.endswith(".m4a"):
+            media_type = "audio/mp4"
+        elif file_path.endswith(".webm"):
+            media_type = "audio/webm"
+        return FileResponse(file_path, media_type=media_type,
+                            headers={"Accept-Ranges": "bytes"})
+
+    # ...otherwise relay the live stream (never 404: the old yt-dlp download
+    # fallback 403'd on networks that cap Range sizes, killing playback).
+    total, ctype = await music_engine.probe_media(video_id)
+    if not total:
         raise HTTPException(status_code=404, detail="Audio not found")
-    return FileResponse(file_path, media_type="audio/mpeg")
+
+    start, end = 0, total - 1
+    rng = (request.headers.get("range") or "").strip() if request else ""
+    if rng.startswith("bytes="):
+        spec = rng[6:].split(",")[0].strip()
+        s, _, e = spec.partition("-")
+        try:
+            if s:
+                start = int(s)
+                if e:
+                    end = min(int(e), total - 1)
+            elif e:
+                start = max(0, total - int(e))
+        except ValueError:
+            pass
+    if start >= total or start > end:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+        "Cache-Control": "no-store",
+    }
+    if start > 0 or end < total - 1:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return StreamingResponse(
+        music_engine.relay_chunks(video_id, start, end),
+        status_code=206 if (start > 0 or end < total - 1) else 200,
+        media_type=ctype or "audio/webm",
+        headers=headers,
+    )
+
+@app.get("/stream-video/{video_id}")
+async def stream_video(video_id: str, request: Request):
+    """Relay the googlevideo ≤720p video stream for the muted <video> visual.
+
+    The <video> element is hard-synced and MUTED in the app — the audio path
+    plays the soundtrack — so this endpoint never records listen history and
+    needs no user auth (mirrors how YouTube Music pairs a video feed with its
+    audio feed). Same closed-range chunk relay as audio, same 206/416 handling.
+    """
+    total, ctype = await music_engine.probe_media(video_id, "video")
+    if not total:
+        raise HTTPException(status_code=404, detail="Video stream not found")
+
+    start, end = 0, total - 1
+    rng = (request.headers.get("range") or "").strip()
+    if rng.startswith("bytes="):
+        spec = rng[6:].split(",")[0].strip()
+        s, _, e = spec.partition("-")
+        try:
+            if s:
+                start = int(s)
+                if e:
+                    end = min(int(e), total - 1)
+            elif e:
+                start = max(0, total - int(e))
+        except ValueError:
+            pass
+    if start >= total or start > end:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+        "Cache-Control": "no-store",
+    }
+    if start > 0 or end < total - 1:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return StreamingResponse(
+        music_engine.relay_chunks(video_id, start, end, "video"),
+        status_code=206 if (start > 0 or end < total - 1) else 200,
+        media_type=ctype or "video/mp4",
+        headers=headers,
+    )
 
 # --- LIKED SONGS ROUTES ---
 
@@ -429,6 +688,8 @@ class PlaylistAddSong(BaseModel):
 async def create_playlist(req: PlaylistCreate, username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
     
     playlist = Playlist(name=req.name, description=req.description, owner_id=user.id)
     db.add(playlist)
@@ -452,6 +713,8 @@ async def add_to_playlist(playlist_id: int, req: PlaylistAddSong, username: str 
     # Verify owner
     user_res = await db.execute(select(User).filter(User.username == username))
     user = user_res.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
     
     pl_res = await db.execute(select(Playlist).filter(Playlist.id == playlist_id, Playlist.owner_id == user.id))
     playlist = pl_res.scalars().first()
@@ -477,8 +740,14 @@ async def add_to_playlist(playlist_id: int, req: PlaylistAddSong, username: str 
     return {"message": "Added to playlist"}
 
 @app.get("/playlists/{playlist_id}")
-async def get_playlist_details(playlist_id: int, db: AsyncSession = Depends(get_db)):
-    pl_res = await db.execute(select(Playlist).filter(Playlist.id == playlist_id))
+async def get_playlist_details(playlist_id: int, username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # Owner-only access prevents IDOR on private playlists
+    user_res = await db.execute(select(User).filter(User.username == username))
+    user = user_res.scalars().first()
+
+    pl_res = await db.execute(
+        select(Playlist).filter(Playlist.id == playlist_id, Playlist.owner_id == (user.id if user else -1))
+    )
     playlist = pl_res.scalars().first()
     if not playlist:
         raise HTTPException(status_code=404, detail="Playlist not found")
@@ -504,6 +773,10 @@ async def get_playlist_details(playlist_id: int, db: AsyncSession = Depends(get_
         } for s in songs]
     }
 
+# Featured playlists cache (avoids hitting YouTube on every app launch)
+_featured_cache = {"data": None, "ts": 0.0}
+FEATURED_CACHE_TTL = 600  # 10 minutes
+
 @app.get("/featured-playlists")
 async def featured_playlists():
     """Returns mood and artist-dedicated playlists with live YouTube thumbnails"""
@@ -522,24 +795,27 @@ async def featured_playlists():
         {"id": "artist_badshah", "name": "Badshah Radio", "type": "artist", "query": "Badshah club party hits"}
     ]
     
-    # Simple cache to avoid hitting YT too hard on every refresh
-    # For a production app, you'd use a real cache like Redis
-    results = []
-    for cat in categories:
+    # Serve from cache when fresh so the home page loads instantly
+    now = time.time()
+    if _featured_cache["data"] and now - _featured_cache["ts"] < FEATURED_CACHE_TTL:
+        return _featured_cache["data"]
+
+    fallback_img = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?q=80&w=400"
+
+    async def _cover(cat):
         try:
-            # Get the top search result's thumbnail to use as the playlist cover
+            # Top search result's thumbnail as the playlist cover
             search_results = await music_engine.search(cat["query"], limit=1)
-            if search_results:
-                cat["image"] = search_results[0]["thumbnail"]
-            else:
-                cat["image"] = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?q=80&w=400"
-            
-            cat["description"] = f"Curated {cat['name']} collection"
-            results.append(cat)
-        except:
-            cat["image"] = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?q=80&w=400"
-            results.append(cat)
-            
+            cat["image"] = search_results[0]["thumbnail"] if search_results else fallback_img
+        except Exception:
+            cat["image"] = fallback_img
+        cat["description"] = f"Curated {cat['name']} collection"
+        return cat
+
+    # Fetch all covers concurrently instead of one-by-one
+    results = list(await asyncio.gather(*(_cover(dict(c)) for c in categories)))
+    _featured_cache["data"] = results
+    _featured_cache["ts"] = now
     return results
 
 # --- ROOMS (JAM) SYSTEM ---
@@ -563,8 +839,13 @@ class ConnectionManager:
 
     async def broadcast(self, room_code: str, message: dict):
         if room_code in self.active_connections:
-            for connection in self.active_connections[room_code]:
-                await connection["ws"].send_json(message)
+            # Iterate over a copy: a failed send removes the dead peer mid-loop,
+            # and one broken socket must never poison the whole room.
+            for connection in list(self.active_connections[room_code]):
+                try:
+                    await connection["ws"].send_json(message)
+                except (WebSocketDisconnect, RuntimeError, OSError):
+                    self.disconnect(room_code, connection["ws"])
 
 manager = ConnectionManager()
 
@@ -575,6 +856,8 @@ async def create_room(name: str, username: str = Depends(get_current_user), db: 
     
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
     
     room = Room(
         room_code=room_code,
@@ -606,8 +889,16 @@ async def room_websocket(websocket: WebSocket, room_code: str, username: str = "
     try:
         while True:
             data = await websocket.receive_json()
+            # Only relay well-formed control messages with a known type —
+            # arbitrary client JSON must not be echoed to every participant
+            if not isinstance(data, dict) or not isinstance(data.get("type"), str):
+                continue
             await manager.broadcast(room_code, data)
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError, ValueError, KeyError):
+        # Malformed JSON, peer already closed, or normal disconnect — all
+        # funnel through the same guaranteed cleanup below
+        pass
+    finally:
         manager.disconnect(room_code, websocket)
         await manager.broadcast(room_code, {"type": "USER_LEAVE", "username": username})
 
@@ -653,9 +944,14 @@ async def google_auth_start():
 @app.get("/auth/google/callback")
 async def google_auth_callback(code: str, state: str):
     from fastapi.responses import HTMLResponse
+    # json.dumps escapes quotes/backslashes so attacker-controlled query params
+    # can't break out of the JS string literal (XSS)
+    import json as _json
+    code_js = _json.dumps(code)
+    state_js = _json.dumps(state)
     # We have the code, now we tell the client to complete the exchange
     html = f"""<!DOCTYPE html>
-<html><head><title>Redew - Signing In</title>
+<html><head><title>Kettle - Signing In</title>
 <style>
 body{{background:#121212;color:#fff;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}
 .card{{text-align:center;padding:40px;max-width:400px}}
@@ -676,12 +972,12 @@ p{{color:#b3b3b3;font-size:14px}}
 fetch('/auth/google/complete', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify({{ code: '{code}', session_id: '{state}' }})
+    body: JSON.stringify({{ code: {code_js}, session_id: {state_js} }})
 }})
 .then(r => r.json())
 .then(data => {{
     if (data.status === 'ok') {{
-        document.getElementById('c').innerHTML = '<h1 class="ok">✓ Login Successful</h1><p>Return to the Redew app to continue.</p>';
+        document.getElementById('c').innerHTML = '<h1 class="ok">✓ Login Successful</h1><p>Return to the Kettle app to continue.</p>';
         setTimeout(() => window.close(), 3000);
     }} else {{
         document.getElementById('c').innerHTML = '<h1 class="err">Login Failed</h1><p>' + (data.detail || 'Error exchanging code') + '</p>';
@@ -730,7 +1026,9 @@ async def google_auth_complete(req: GoogleCompleteRequest, db: AsyncSession = De
         userinfo = user_res.json()
 
     email = userinfo.get('email')
-    name = userinfo.get('name', email.split('@')[0])
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account has no email address")
+    name = userinfo.get('name') or email.split('@')[0]
     
     result = await db.execute(select(User).filter(User.email == email))
     user = result.scalars().first()
@@ -740,7 +1038,10 @@ async def google_auth_complete(req: GoogleCompleteRequest, db: AsyncSession = De
         if uname_check.scalars().first():
             import random
             name = f"{name}{random.randint(1000, 9999)}"
-        user = User(username=name, email=email, hashed_password=get_password_hash(f"google_user_{email}"))
+        # Random password: OAuth users must sign in via Google — never a
+        # guessable scheme like google_user_<email> that allows password login
+        import secrets
+        user = User(username=name, email=email, hashed_password=get_password_hash(secrets.token_urlsafe(32)))
         db.add(user)
         await db.commit()
         await db.refresh(user)

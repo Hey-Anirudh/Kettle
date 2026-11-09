@@ -9,6 +9,10 @@ def run():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     backend_dir = os.path.join(base_dir, "backend")
     venv_python = os.path.join(backend_dir, "venv", "Scripts", "python.exe")
+    if not os.path.exists(venv_python):
+        # No venv on this machine — fall back to whatever Python is on PATH
+        venv_python = sys.executable
+        print(f"No backend venv found, using system Python: {venv_python}")
     
     backend_process = subprocess.Popen(
         [venv_python, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000", "--reload"],

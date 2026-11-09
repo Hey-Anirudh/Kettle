@@ -1,5 +1,5 @@
 {
-  "name": "redew",
+  "name": "kettle",
   "private": true,
   "version": "1.1.0",
   "author": "Anirudh",
@@ -17,8 +17,8 @@
     "make": "electron-forge make"
   },
   "build": {
-    "appId": "com.redew.music",
-    "productName": "Redew Music",
+    "appId": "com.kettle.music",
+    "productName": "Kettle",
     "icon": "icon.ico",
     "directories": {
       "output": "build_release"
@@ -26,6 +26,7 @@
     "files": [
       "dist/**/*",
       "main.cjs",
+      "preload.cjs",
       "package.json",
       "icon.ico"
     ],
@@ -50,13 +51,13 @@
       "allowToChangeInstallationDirectory": true,
       "installerIcon": "icon.ico",
       "uninstallerIcon": "icon.ico",
-      "shortcutName": "Redew Music"
+      "shortcutName": "Kettle"
     },
     "publish": [
       {
         "provider": "github",
         "owner": "Hey-Anirudh",
-        "repo": "Redew-Music"
+        "repo": "Kettle-Music"
       }
     ]
   },

@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/music_provider.dart';
 import 'providers/room_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/auth_screen.dart';
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await dotenv.load();
   runApp(const RedewApp());
 }
 
@@ -71,28 +70,59 @@ class _AppShellState extends State<AppShell> {
         if (auth.status == AuthStatus.unauthenticated) {
           return const AuthScreen();
         }
-        return Scaffold(
-          body: _pages[_currentNavIndex],
-          bottomNavigationBar: BottomNavigationBar(
-            currentIndex: _currentNavIndex,
-            onTap: (i) => setState(() => _currentNavIndex = i),
-            backgroundColor: const Color(0xFF0A0A0A),
-            selectedItemColor: const Color(0xFFE60000),
-            unselectedItemColor: Colors.grey,
-            type: BottomNavigationBarType.fixed,
-            items: const [
-              BottomNavigationBarItem(icon: Icon(Icons.home_outlined), activeIcon: Icon(Icons.home), label: 'Home'),
-              BottomNavigationBarItem(icon: Icon(Icons.search_outlined), activeIcon: Icon(Icons.search), label: 'Search'),
-              BottomNavigationBarItem(icon: Icon(Icons.library_music_outlined), activeIcon: Icon(Icons.library_music), label: 'Library'),
-            ],
-          ),
+        // Authenticated — build with global mini player
+        return Consumer<MusicProvider>(
+          builder: (context, music, _) {
+            // Show playback error snackbar
+            final error = music.lastPlaybackError;
+            if (error != null) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (context.mounted && music.lastPlaybackError != null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(error, style: const TextStyle(color: Colors.white)),
+                      backgroundColor: Colors.red.shade800,
+                      action: SnackBarAction(label: 'OK', onPressed: () => music.clearError()),
+                      duration: const Duration(seconds: 4),
+                    ),
+                  );
+                  music.clearError();
+                }
+              });
+            }
+
+            return Scaffold(
+              body: _pages[_currentNavIndex],
+              bottomNavigationBar: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Global mini player (visible on all tabs)
+                  if (music.currentTrack != null)
+                    _GlobalMiniPlayer(music: music),
+                  BottomNavigationBar(
+                    currentIndex: _currentNavIndex,
+                    onTap: (i) => setState(() => _currentNavIndex = i),
+                    backgroundColor: const Color(0xFF0A0A0A),
+                    selectedItemColor: const Color(0xFFE60000),
+                    unselectedItemColor: Colors.grey,
+                    type: BottomNavigationBarType.fixed,
+                    items: const [
+                      BottomNavigationBarItem(icon: Icon(Icons.home_outlined), activeIcon: Icon(Icons.home), label: 'Home'),
+                      BottomNavigationBarItem(icon: Icon(Icons.search_outlined), activeIcon: Icon(Icons.search), label: 'Search'),
+                      BottomNavigationBarItem(icon: Icon(Icons.library_music_outlined), activeIcon: Icon(Icons.library_music), label: 'Library'),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          },
         );
       },
     );
   }
 }
 
-// Dummy screens for navigation
+// ─── Search Screen (embedded in main) ──────────────────────
 class SearchScreen extends StatelessWidget {
   const SearchScreen({super.key});
 
@@ -148,6 +178,7 @@ class SearchScreen extends StatelessWidget {
   }
 }
 
+// ─── Library Screen (embedded in main) ────────────────────
 class LibraryScreen extends StatelessWidget {
   const LibraryScreen({super.key});
 
@@ -250,7 +281,233 @@ class LibraryScreen extends StatelessWidget {
   }
 }
 
-// Shared track list item widget
+// ─── Global Mini Player ────────────────────────────────────
+class _GlobalMiniPlayer extends StatelessWidget {
+  final MusicProvider music;
+
+  const _GlobalMiniPlayer({required this.music});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => _showFullPlayer(context),
+      child: Container(
+        height: 64,
+        decoration: const BoxDecoration(
+          color: Color(0xFF1E1E1E),
+          border: Border(top: BorderSide(color: Color(0xFF282828))),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: Image.network(
+                music.currentTrack!.thumbnail,
+                width: 48,
+                height: 48,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Container(
+                  width: 48, height: 48,
+                  color: Colors.grey[800],
+                  child: const Icon(Icons.music_note, size: 24, color: Colors.grey),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    music.currentTrack!.title.split('|')[0].trim(),
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  Text(
+                    music.currentTrack!.channel,
+                    style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              icon: Icon(
+                music.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                color: const Color(0xFFE60000),
+                size: 32,
+              ),
+              onPressed: () => music.togglePlay(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showFullPlayer(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChangeNotifierProvider.value(
+          value: music,
+          child: const _FullPlayerScreen(),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Full Player Screen ────────────────────────────────────
+class _FullPlayerScreen extends StatelessWidget {
+  const _FullPlayerScreen();
+
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes.remainder(60);
+    final seconds = d.inSeconds.remainder(60);
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<MusicProvider>(
+      builder: (context, music, _) {
+        return Scaffold(
+          backgroundColor: const Color(0xFF0A0A0A),
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            leading: IconButton(
+              icon: const Icon(Icons.keyboard_arrow_down),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+          body: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              children: [
+                // Album Art
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.network(
+                    music.currentTrack?.thumbnail ?? '',
+                    height: 300,
+                    width: 300,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      height: 300, width: 300,
+                      color: Colors.grey[800],
+                      child: const Icon(Icons.music_note, size: 80, color: Colors.grey),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 32),
+                // Track info
+                Text(
+                  music.currentTrack?.title.split('|')[0].trim() ?? '',
+                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  music.currentTrack?.channel ?? '',
+                  style: TextStyle(fontSize: 16, color: Colors.grey[400]),
+                ),
+                const SizedBox(height: 32),
+                // Progress bar
+                Row(
+                  children: [
+                    Text(_formatDuration(music.position), style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: const Color(0xFFE60000),
+                          inactiveTrackColor: const Color(0xFF282828),
+                          thumbColor: const Color(0xFFE60000),
+                          overlayColor: const Color(0x29E60000),
+                        ),
+                        child: Slider(
+                          value: music.duration.inSeconds > 0
+                              ? music.position.inSeconds / music.duration.inSeconds
+                              : 0,
+                          onChanged: (v) => music.seek(Duration(seconds: (v * music.duration.inSeconds).round())),
+                        ),
+                      ),
+                    ),
+                    Text(_formatDuration(music.duration), style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                // Controls
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    IconButton(
+                      icon: Icon(Icons.shuffle, color: music.isShuffled ? const Color(0xFFE60000) : Colors.grey),
+                      onPressed: music.toggleShuffle,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.skip_previous, color: Colors.white, size: 32),
+                      onPressed: music.previous,
+                    ),
+                    Container(
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFE60000),
+                        shape: BoxShape.circle,
+                      ),
+                      child: IconButton(
+                        icon: Icon(music.isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white, size: 36),
+                        onPressed: music.togglePlay,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.skip_next, color: Colors.white, size: 32),
+                      onPressed: music.next,
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.repeat, color: music.repeatMode != 'none' ? const Color(0xFFE60000) : Colors.grey),
+                      onPressed: music.cycleRepeat,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 32),
+                // Volume
+                Row(
+                  children: [
+                    const Icon(Icons.volume_down, color: Colors.grey, size: 18),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: Colors.grey,
+                          inactiveTrackColor: const Color(0xFF282828),
+                          thumbColor: Colors.white,
+                          overlayColor: const Color(0x29FFFFFF),
+                        ),
+                        child: Slider(
+                          value: music.volume,
+                          onChanged: music.setVolume,
+                        ),
+                      ),
+                    ),
+                    const Icon(Icons.volume_up, color: Colors.grey, size: 18),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─── Shared Track List Item ───────────────────────────────
 class _TrackListItem extends StatelessWidget {
   final dynamic track;
   final VoidCallback onTap;

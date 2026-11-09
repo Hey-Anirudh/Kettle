@@ -1,34 +1,37 @@
 import asyncio
 import os
-import re
-import json
 import time
 import logging
-import hashlib
-import aiohttp
 import yt_dlp
-from typing import Union, Optional, Dict, List
-from youtubesearchpython.__future__ import VideosSearch
-from pyrogram import Client, filters
-from pyrogram.enums import MessagesFilter
+import httpx
+from typing import Union, Optional, Dict, List, Tuple
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RedewMusicEngine")
+logger = logging.getLogger("KettleMusicEngine")
+
+# Cache TTLs (googlevideo stream URLs stay valid ~6 hours)
+STREAM_TTL = 3 * 3600   # 3 hours
+RELATED_TTL = 1800      # 30 minutes for radio-mix lists
+
+# googlevideo edges (and some ISP middleboxes) reject large or open-ended
+# Range requests with 403 — only small CLOSED ranges return bytes. Relaying in
+# 256 KB closed-range chunks (verified working) makes playback robust everywhere.
+RELAY_CHUNK = 256 * 1024
 
 class MusicEngine:
     def __init__(self, config=None):
         self.config = config or {}
-        self.download_folder = "downloads"
         
-        # Telegram Settings
-        self.session_string = self.config.get("SESSION_STRING")
-        self.you_music_session = self.config.get("YOU_MUSIC_SESSION")
-        self.channel_username = self.config.get("CHANNEL_USERNAME", "@shakkydb")
-        self.group_username = self.config.get("GROUP_USERNAME", "shadowmusicbase")
-        self.db_channel_id = self.config.get("DATABASE_CHANNEL_ID")
+        # Safe writable download folder (in %APPDATA%/Kettle/downloads or local dev)
+        import sys
+        if getattr(sys, 'frozen', False):
+            base_app_data = os.getenv('APPDATA', os.path.expanduser('~'))
+            self.download_folder = os.path.join(base_app_data, 'Kettle', 'downloads')
+        else:
+            self.download_folder = os.path.abspath("downloads")
         
         # Spotify Settings
         self.spotify_id = self.config.get("SPOTIFY_CLIENT_ID")
@@ -44,85 +47,69 @@ class MusicEngine:
             except Exception as e:
                 logger.warning(f"Spotify Init Failed: {e}")
 
-        # Pyrogram Clients
-        self.app = None
-        self.you_app = None
-        self.initialized = False
-        self.initializing = False
-        
+        # Local cache folder for downloaded audio
         os.makedirs(self.download_folder, exist_ok=True)
 
-    async def initialize(self):
-        if self.initialized or self.initializing: return
-        self.initializing = True
-        
-        # We run this in background so it doesn't block the whole API if Telegram is slow
-        asyncio.create_task(self._init_clients())
+        # Warm caches for instant playback
+        self._stream_cache = {}   # video_id -> (url, headers, expires_at) — audio
+        self._video_cache = {}    # video_id -> (url, headers, expires_at) — muted <video> visual
+        self._related_cache = {}  # video_id -> (songs, fetched_at)
+        # Per-key locks: concurrent requests for the same video share one
+        # extraction/download instead of racing on the same files
+        self._key_locks: Dict[str, asyncio.Lock] = {}
 
-    async def _init_clients(self):
+    @staticmethod
+    def _fmt_duration(secs) -> str:
         try:
-            if self.session_string:
-                self.app = Client(
-                    "redew_web_client",
-                    session_string=self.session_string,
-                    api_id=int(self.config.get("API_ID")),
-                    api_hash=self.config.get("API_HASH"),
-                    in_memory=True,
-                    no_updates=True
-                )
-                await self.app.start()
-                logger.info("Main Telegram Client Started")
-
-            if self.you_music_session:
-                self.you_app = Client(
-                    "you_music_client",
-                    session_string=self.you_music_session,
-                    api_id=int(self.config.get("API_ID")),
-                    api_hash=self.config.get("API_HASH"),
-                    in_memory=True,
-                    no_updates=True
-                )
-                await self.you_app.start()
-                logger.info("YouMusic Client Started")
-        except Exception as e:
-            logger.error(f"Telegram Initialization Error: {e}")
-        finally:
-            self.initialized = True
-            self.initializing = False
+            s = int(float(secs))
+            return f"{s // 60}:{s % 60:02d}"
+        except (TypeError, ValueError):
+            return "0:00"
 
     async def search(self, query: str, limit: int = 20):
-        """Search YouTube for songs with metadata enhancement"""
+        """Search YouTube via yt-dlp flat extraction — fast, no extra dependencies."""
         print(f"DEBUG: Searching for '{query}'...")
-        # If Spotify Link
+        # If Spotify Link — wrapped so a spotipy/network error returns [] instead
+        # of a 500 (this branch runs before the main try/except below)
         if "spotify.com" in query:
-            return await self._handle_spotify(query)
+            try:
+                return await self._handle_spotify(query)
+            except Exception as e:
+                print(f"DEBUG: Spotify search error: {e}")
+                return []
+
+        def _extract():
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': 'in_playlist',   # search page only, no per-video fetches
+                'skip_download': True,
+                'playlist_items': f'1-{limit}',
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(f"ytsearch{limit}:{query.strip()}", download=False)
 
         try:
-            search = VideosSearch(query.strip(), limit=limit)
-            result = await search.next()
-            
+            info = await asyncio.get_running_loop().run_in_executor(None, _extract)
             songs = []
-            if result and "result" in result:
-                for item in result["result"]:
-                    try:
-                        thumb = ""
-                        if item.get("thumbnails") and len(item["thumbnails"]) > 0:
-                            thumb = item["thumbnails"][0].get("url", "") or ""
-                        
-                        channel_info = item.get("channel") or {}
-                        channel_name = channel_info.get("name") or "Unknown"
-                        
-                        songs.append({
-                            "id": item.get("id", ""),
-                            "title": item.get("title", "Unknown") or "Unknown",
-                            "duration": item.get("duration") or "0:00",
-                            "thumbnail": thumb,
-                            "link": item.get("link") or "",
-                            "channel": channel_name
-                        })
-                    except Exception as item_err:
-                        print(f"DEBUG: Skipping bad result item: {item_err}")
-                        continue
+            for item in (info or {}).get('entries') or []:
+                if not item:
+                    continue
+                vid = item.get('id') or ''
+                if not vid:
+                    continue
+                thumbs = item.get('thumbnails') or []
+                thumb = (thumbs[-1].get('url', '') if thumbs else '') or \
+                        f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                songs.append({
+                    "id": vid,
+                    "title": item.get('title') or "Unknown",
+                    "duration": self._fmt_duration(item.get('duration')),
+                    "thumbnail": thumb,
+                    "link": item.get('url') or f"https://www.youtube.com/watch?v={vid}",
+                    "channel": item.get('channel') or item.get('uploader')
+                              or item.get('uploader_id') or "Unknown",
+                })
             print(f"DEBUG: Found {len(songs)} results")
             return songs
         except Exception as e:
@@ -131,6 +118,11 @@ class MusicEngine:
 
     async def get_related_videos(self, video_id: str, limit: int = 25):
         """Get YouTube's own radio mix recommendations for a video"""
+        # Cached radio mix = instant recommendations for repeat plays
+        cached = self._related_cache.get(video_id)
+        if cached and time.time() - cached[1] < RELATED_TTL:
+            return cached[0]
+
         print(f"DEBUG: Getting related videos for {video_id}...")
         try:
             # Use YouTube's Radio Mix playlist — this is YouTube's own recommendation engine
@@ -150,7 +142,7 @@ class MusicEngine:
                     info = ydl.extract_info(mix_url, download=False)
                     return info
 
-            info = await asyncio.get_event_loop().run_in_executor(None, _extract)
+            info = await asyncio.get_running_loop().run_in_executor(None, _extract)
             
             songs = []
             entries = info.get('entries', []) if info else []
@@ -176,10 +168,12 @@ class MusicEngine:
                 try:
                     secs = int(song['duration'])
                     song['duration'] = f"{secs // 60}:{secs % 60:02d}"
-                except:
+                except (TypeError, ValueError):
                     song['duration'] = "0:00"
             
             print(f"DEBUG: Found {len(songs)} related videos")
+            if songs:
+                self._related_cache[video_id] = (songs, time.time())
             return songs
         except Exception as e:
             print(f"DEBUG: Related videos error: {e}")
@@ -191,7 +185,11 @@ class MusicEngine:
         
         if "/track/" in link:
             track = await asyncio.to_thread(self.spotify.track, link)
-            query = f"{track['name']} {track['artists'][0]['name']}"
+            artists = track.get('artists') or []
+            artist_name = artists[0].get('name', '') if artists else ''
+            query = f"{track.get('name', '')} {artist_name}".strip()
+            if not query:
+                return []
             return await self.search(query, limit=1)
         elif "/playlist/" in link:
             # For simplicity, we'll just search for the first few tracks
@@ -199,61 +197,248 @@ class MusicEngine:
         return []
 
     async def get_stream_url(self, video_id: str):
-        """Extract LIVE HLS/m3u8 URL for zero-delay streaming"""
+        """Extract a direct googlevideo URL (kept for prefetch warming)."""
+        src = await self.get_stream_source(video_id)
+        return src[0] if src else None
+
+    async def get_stream_source(self, video_id: str) -> Optional[Tuple[str, dict]]:
+        """Return (url, http_headers) for the best audio format, cached."""
+        # Cache hit = instant start (no yt-dlp round-trip)
+        cached = self._stream_cache.get(video_id)
+        if cached and time.time() < cached[2]:
+            return cached[0], cached[1]
+
         url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'no_warnings': True,
-            'force_generic_extractor': False,
-            'extractor_args': {'youtube': ['player_client=android']}
-        }
-        
-        def _extract():
+
+        def _extract(client):
+            ydl_opts = {
+                # Top audio quality: best Opus direct stream first (YouTube's
+                # 160 kbps Opus is the best quality it offers), then any direct
+                # https audio — never m3u8 playlists, which the closed-range
+                # relay cannot carry.
+                'format': 'bestaudio[acodec=opus][protocol=https]/bestaudio[protocol=https]/bestaudio',
+                'quiet': True,
+                'no_warnings': True,
+                'force_generic_extractor': False,
+            }
+            if client:
+                ydl_opts['extractor_args'] = {'youtube': [f'player_client={client}']}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                # Check for HLS formats
-                hls_url = info.get('url')
-                # If it's a direct URL but not m3u8, it's still a fast stream
-                return hls_url
-        
+                # Direct URL (googlevideo) — fast even when not HLS.
+                # The matching http_headers MUST accompany the URL — the edge
+                # 403s requests whose headers don't match the issued client.
+                return info.get('url'), dict(info.get('http_headers') or {})
+
+        # Single-flight: N simultaneous requests for the same video share one
+        # extraction instead of all hammering YouTube
+        lock = self._key_locks.setdefault(f"stream:{video_id}", asyncio.Lock())
+        async with lock:
+            cached = self._stream_cache.get(video_id)
+            if cached and time.time() < cached[2]:
+                return cached[0], cached[1]
+            loop = asyncio.get_running_loop()
+            try:
+                try:
+                    stream_url, headers = await loop.run_in_executor(None, _extract, 'android')
+                except Exception as android_err:
+                    # Some videos reject the android client — retry with the default web client
+                    logger.warning(f"android client failed for {video_id}, retrying default: {android_err}")
+                    stream_url, headers = await loop.run_in_executor(None, _extract, None)
+                if stream_url:
+                    self._stream_cache[video_id] = (stream_url, headers, time.time() + STREAM_TTL)
+                    # Evict expired entries so the cache can't grow forever
+                    if len(self._stream_cache) > 500:
+                        now = time.time()
+                        self._stream_cache = {
+                            k: v for k, v in self._stream_cache.items() if now < v[2]
+                        }
+                return (stream_url, headers) if stream_url else None
+            except Exception as e:
+                logger.error(f"Stream extraction failed: {e}")
+                return None
+
+    def invalidate_stream(self, video_id: str):
+        """Drop a cached stream URL (called when the edge rejects it)."""
+        self._stream_cache.pop(video_id, None)
+
+    async def get_video_source(self, video_id: str) -> Optional[Tuple[str, dict]]:
+        """Return (url, http_headers) for the best ≤1080p video format, cached.
+
+        A video-only DASH format is fine: the <video> element we feed is
+        muted — the audio element plays the soundtrack — so no audio codec
+        is required on this stream.
+        """
+        cached = self._video_cache.get(video_id)
+        if cached and time.time() < cached[2]:
+            return cached[0], cached[1]
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        def _extract(client):
+            ydl_opts = {
+                # Top video quality: direct 1080p mp4 video-only stream, H.264
+                # preferred over AV1 (flawless decode in Chromium everywhere,
+                # including machines without an AV1 decoder). No muxed formats
+                # are offered by YouTube anymore; direct https URLs only —
+                # never m3u8 playlists, which the closed-range relay cannot carry.
+                'format': 'bestvideo[height<=1080][ext=mp4][protocol=https][vcodec^=avc]/bestvideo[height<=1080][ext=mp4][protocol=https]/bestvideo[height<=1080][protocol=https]',
+                'quiet': True,
+                'no_warnings': True,
+                'force_generic_extractor': False,
+            }
+            if client:
+                ydl_opts['extractor_args'] = {'youtube': [f'player_client={client}']}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return info.get('url'), dict(info.get('http_headers') or {})
+
+        lock = self._key_locks.setdefault(f"video:{video_id}", asyncio.Lock())
+        async with lock:
+            cached = self._video_cache.get(video_id)
+            if cached and time.time() < cached[2]:
+                return cached[0], cached[1]
+            loop = asyncio.get_running_loop()
+            try:
+                try:
+                    stream_url, headers = await loop.run_in_executor(None, _extract, 'android')
+                except Exception as android_err:
+                    # android is usually fast; ios is the other safe client.
+                    # Deliberately NO default-web-client retry: it hangs on the
+                    # JS challenge for minutes with no JS runtime configured.
+                    logger.warning(f"android client failed for video {video_id}, retrying ios: {android_err}")
+                    stream_url, headers = await loop.run_in_executor(None, _extract, 'ios')
+                if stream_url:
+                    self._video_cache[video_id] = (stream_url, headers, time.time() + STREAM_TTL)
+                    if len(self._video_cache) > 200:
+                        now = time.time()
+                        self._video_cache = {
+                            k: v for k, v in self._video_cache.items() if now < v[2]
+                        }
+                return (stream_url, headers) if stream_url else None
+            except Exception as e:
+                logger.error(f"Video stream extraction failed: {e}")
+                return None
+
+    def invalidate_video(self, video_id: str):
+        """Drop a cached video URL (called when the edge rejects it)."""
+        self._video_cache.pop(video_id, None)
+
+    async def _source(self, video_id: str, kind: str):
+        """Pick the cached/extractor stream source by media kind."""
+        if kind == "video":
+            return await self.get_video_source(video_id)
+        return await self.get_stream_source(video_id)
+
+    def _invalidate(self, video_id: str, kind: str):
+        if kind == "video":
+            self.invalidate_video(video_id)
+        else:
+            self.invalidate_stream(video_id)
+
+    async def probe_media(self, video_id: str, kind: str = "audio") -> Tuple[Optional[int], Optional[str]]:
+        """Learn (total_size, content_type) via a 1-byte closed range request."""
+        src = await self._source(video_id, kind)
+        if not src:
+            return None, None
+        url, headers = src
+        default_ctype = "video/mp4" if kind == "video" else "audio/webm"
         try:
-            return await asyncio.get_event_loop().run_in_executor(None, _extract)
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+                r = await c.get(url, headers={**headers, "Range": "bytes=0-0"})
+                if r.status_code == 206:
+                    cr = r.headers.get("content-range", "")
+                    total = int(cr.rsplit("/", 1)[-1]) if "/" in cr else None
+                    ctype = r.headers.get("content-type") or default_ctype
+                    if total:
+                        return total, ctype
+                elif r.status_code in (403, 410, 416):
+                    # URL expired/edge-rejected — refresh and retry once
+                    self._invalidate(video_id, kind)
+                    src = await self._source(video_id, kind)
+                    if src:
+                        url, headers = src
+                        r = await c.get(url, headers={**headers, "Range": "bytes=0-0"})
+                        if r.status_code == 206:
+                            cr = r.headers.get("content-range", "")
+                            total = int(cr.rsplit("/", 1)[-1]) if "/" in cr else None
+                            ctype = r.headers.get("content-type") or default_ctype
+                            if total:
+                                return total, ctype
         except Exception as e:
-            logger.error(f"Stream extraction failed: {e}")
-            return None
+            logger.error(f"probe_media failed for {video_id}: {e}")
+        return None, None
+
+    async def relay_chunks(self, video_id: str, start: int, end: int, kind: str = "audio"):
+        """Yield media bytes for [start..end] using small CLOSED ranges.
+
+        Some networks/edges 403 open-ended (bytes=0-) or large range requests,
+        which kills both a raw redirect and yt-dlp downloads. Relaying fixed
+        256 KB closed chunks with the client's native headers always works,
+        and re-extracts once if the URL expires mid-stream.
+        """
+        pos = start
+        retries = 0
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as c:
+                while pos <= end:
+                    src = await self._source(video_id, kind)
+                    if not src:
+                        logger.error(f"relay: no {kind} stream source for {video_id}")
+                        return
+                    url, headers = src
+                    chunk_end = min(pos + RELAY_CHUNK - 1, end)
+                    try:
+                        async with c.stream(
+                            "GET", url,
+                            headers={**headers, "Range": f"bytes={pos}-{chunk_end}"},
+                        ) as r:
+                            logger.debug(f"relay chunk {video_id} bytes={pos}-{chunk_end} -> {r.status_code}")
+                            if r.status_code == 206:
+                                received = 0
+                                async for block in r.aiter_bytes():
+                                    received += len(block)
+                                    yield block
+                                if received == 0:
+                                    raise httpx.HTTPError("empty 206 body")
+                                pos += received
+                                retries = 0
+                                continue
+                            if r.status_code in (403, 410, 416):
+                                # URL went stale or edge hiccup — refresh & retry
+                                self._invalidate(video_id, kind)
+                            else:
+                                logger.warning(
+                                    f"relay unexpected status {r.status_code} "
+                                    f"at byte {pos} for {video_id}")
+                    except (httpx.HTTPError, OSError) as e:
+                        logger.warning(f"relay chunk error at {pos}: {e}")
+                        self._invalidate(video_id, kind)
+                    retries += 1
+                    if retries > 4:
+                        logger.error(f"relay giving up on {video_id} at byte {pos}")
+                        return
+                    await asyncio.sleep(0.2 * retries)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"relay failed for {video_id}: {e}")
 
     async def get_audio_path(self, video_id: str, title: str = None):
-        """Tiered Retrieval Logic (The Redew Method)"""
-        # 0. Local Check
+        """Local cache first, then direct YouTube download via yt-dlp."""
+        # 1. Local cache check
         local_path = os.path.join(self.download_folder, f"{video_id}.mp3")
         if os.path.exists(local_path):
             return local_path
 
-        # If Telegram is initialized, use the "Step 2" strategy
-        if self.app:
-            # 1. Sentinel DB Check (Primary Fast Cache)
-            if self.db_channel_id:
-                msg = await self._search_channel(self.db_channel_id, video_id)
-                if msg:
-                    logger.info(f"Sentinel DB Hit: {video_id}")
-                    return await self.app.download_media(msg, file_name=local_path)
-
-            # 2. SmashDB Check (Secondary Cache)
-            msg = await self._search_channel(self.channel_username, video_id)
-            if msg:
-                logger.info(f"SmashDB Hit: {video_id}")
-                return await self.app.download_media(msg, file_name=local_path)
-
-        # 3. Fallback: yt-dlp (Direct Web Retrieval)
-        return await self._download_ytdlp(video_id)
-
-    async def _search_channel(self, chat_id, video_id):
-        try:
-            async for message in self.app.search_messages(chat_id, query=video_id, filter=MessagesFilter.AUDIO, limit=1):
-                return message
-        except: return None
+        # 2. Fallback: yt-dlp (Direct YouTube Retrieval)
+        # Per-video lock prevents two concurrent requests from downloading to
+        # the same output path simultaneously (Windows rename collisions)
+        lock = self._key_locks.setdefault(f"dl:{video_id}", asyncio.Lock())
+        async with lock:
+            if os.path.exists(local_path):
+                return local_path
+            return await self._download_ytdlp(video_id)
 
     async def _download_ytdlp(self, video_id):
         file_path = os.path.join(self.download_folder, f"{video_id}.mp3")
@@ -279,15 +464,23 @@ class MusicEngine:
                 ydl.download([url])
         
         try:
-            await asyncio.get_event_loop().run_in_executor(None, _dl)
-            
-            # Check for various extensions
-            for ext in ['.mp3', '.m4a', '.webm']:
-                p = file_path.replace('.mp3', ext)
-                if os.path.exists(p):
-                    if ext != '.mp3':
-                        os.rename(p, file_path)
-                    return file_path
+            await asyncio.get_running_loop().run_in_executor(None, _dl)
         except Exception as e:
+            # Download may have succeeded while only FFmpeg post-processing
+            # failed — don't give up, fall through and look for raw output
             logger.error(f"yt-dlp failed: {e}")
+
+        # Check for various extensions (runs even after a post-process error)
+        for ext in ['.mp3', '.m4a', '.webm']:
+            p = file_path.replace('.mp3', ext)
+            if os.path.exists(p):
+                if ext != '.mp3':
+                    try:
+                        os.replace(p, file_path)
+                    except OSError:
+                        # Another request renamed it first — serve theirs
+                        if os.path.exists(file_path):
+                            return file_path
+                        continue
+                return file_path
         return None

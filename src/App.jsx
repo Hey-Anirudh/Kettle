@@ -1,18 +1,18 @@
-import React, { useState, useRef, useCallback, useEffect, memo } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo, memo } from 'react';
 import {
   Search, Home, Library, Play, Pause, SkipBack, SkipForward,
   Volume2, VolumeX, Repeat, Repeat1, Shuffle, Music2, User, Heart,
-  PlusSquare, ListMusic, Maximize2, ChevronDown, X, Clock, Disc3, Users, Share2, UserPlus
+  PlusSquare, ListMusic, Maximize2, ChevronDown, X, Clock, Disc3, Users, Share2, UserPlus,
+  ChevronLeft, ChevronRight, Camera, LifeBuoy,
+  Snowflake, Zap, Headphones, HeartCrack, PartyPopper, Moon, Flame,
+  MonitorPlay, Check
 } from 'lucide-react';
 import axios from 'axios';
+import logoMark from './assets/logo-mark.png';
 import { useMusic } from './context/MusicContext';
-// Google OAuth handled via system browser + backend polling
 import { motion, AnimatePresence } from 'framer-motion';
+import { API_BASE } from './config';
 import './App.css';
-
-// For local development: http://127.0.0.1:8000
-// For production/global sharing: Put your Render/Railway URL here (e.g., https://redew-api.onrender.com)
-const API_BASE = 'http://127.0.0.1:8000'; 
 
 const ONBOARDING_GENRES = [
   "Bollywood", "Punjabi", "Haryanvi", "Pop", "Hip-Hop", "Lo-Fi", "Indie", "Rock",
@@ -89,18 +89,216 @@ const TrackRow = memo(({ track, index, list, isActive, isPlaying, isLiked, onPla
   );
 });
 
+// ============================================================================
+// TASTE ENGINE — turns an account's REAL signals (plays, likes, searches)
+// into home-page shelves. Every user gets different shelves because these
+// inputs differ per account; brand-new accounts get time-of-day moods.
+// ============================================================================
+const GENRE_LEXICON = [
+  ['Lo-Fi',        ['lofi', 'lo fi', 'chillhop', 'study beat', 'lofi hip hop']],
+  ['Hip-Hop',      ['hip hop', 'hip-hop', 'rap ', ' rap', 'trap', 'drill', 'freestyle']],
+  ['Pop',          ['pop ', ' pop', 'billboard', 'top 40', 'earworm']],
+  ['Punjabi',      ['punjabi', 'bhangra', 'sidhu moosewala', 'ap dhillon', 'karan aujla', 'diljit']],
+  ['Bollywood',    ['bollywood', 'hindi', 'arijit singh', 'atif aslam', 'arijit', 'filmi']],
+  ['R&B',          ['r&b', 'rnb', 'r and b', 'soul ', ' neo soul']],
+  ['EDM',          ['edm', 'house', 'techno', 'festival', 'marshmello', 'david guetta', 'avicii', 'slap house']],
+  ['Rock',         ['rock', 'metal', 'indie band', 'guitar solo', 'alternative']],
+  ['Latin',        ['reggaeton', 'latin', 'despacito', 'bad bunny', 'urbano']],
+  ['Classical',    ['classical', 'piano', 'orchestra', 'cello', 'symphony']],
+  ['Workout',      ['workout', 'gym', 'fitness', 'training', 'beast mode']],
+  ['Sad',          ['sad song', 'heartbreak', 'breakup', 'cry', 'lonely']],
+  ['Country',      ['country', 'folk', 'acoustic guitar']],
+  ['K-Pop',        ['kpop', 'k-pop', 'bts', 'blackpink', 'stray kids']],
+];
+
+// Words that carry no taste signal when they appear in search queries
+const NOISE_WORDS = new Set([
+  'the', 'and', 'song', 'songs', 'music', 'mix', 'of', 'a', 'an', 'to', 'my',
+  'for', 'top', 'best', 'hit', 'hits', 'new', 'latest', 'video', 'videos',
+  'audio', 'lyrics', 'lyric', 'official', 'free', 'download', '2024', '2025',
+  '2026', 'full', 'album', 'playlist', 'listen', 'online', 'hd'
+]);
+
+function scoreGenres(texts) {
+  const blob = texts.join(' ').toLowerCase();
+  if (!blob.trim()) return [];
+  return GENRE_LEXICON
+    .map(([genre, tokens]) => {
+      let score = 0;
+      for (const t of tokens) {
+        let i = blob.indexOf(t);
+        while (i !== -1) { score += 1; i = blob.indexOf(t, i + t.length); }
+      }
+      return { genre, score };
+    })
+    .filter(g => g.score > 0)
+    .sort((a, b) => b.score - a.score);
+}
+
+function topSearchQueries(queries) {
+  const counts = new Map();
+  for (const raw of queries || []) {
+    const q = (raw || '').trim().toLowerCase();
+    if (q.length < 3 || q.length > 60) continue;
+    const words = q.split(/\s+/).filter(w => w && !NOISE_WORDS.has(w) && !/^\d+$/.test(w));
+    if (!words.length) continue;
+    const key = words.join(' ');
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([q]) => q);
+}
+
+function buildTasteShelves({ listenHistory, searchHistory, likedSongsList }) {
+  const shelves = [];
+  const played = listenHistory || [];
+  const liked = likedSongsList || [];
+  const queries = searchHistory || [];
+
+  const playedText = played.map(t => `${t.title || ''} ${t.channel || ''}`);
+  const likedText = liked.map(t => `${t.title || ''} ${t.channel || ''}`);
+  const allText = [...playedText, ...likedText, ...queries];
+
+  // 1) Radio-matched to the anchor track (newest like, else newest play)
+  const anchor = liked[0] || played[0];
+  if (anchor && anchor.id && anchor.title) {
+    shelves.push({
+      key: 'more-like',
+      title: `More like “${anchor.title.slice(0, 34)}”`,
+      sub: 'Radio-matched to what you play',
+      recommend: { title: anchor.title, channel: anchor.channel || '', current_id: anchor.id }
+    });
+  }
+
+  // 2) The user's dominant genre, as a radio row
+  const genres = scoreGenres(allText);
+  if (genres[0]) {
+    shelves.push({
+      key: `genre-${genres[0].genre}`,
+      title: `Your ${genres[0].genre} radio`,
+      sub: genres[0].score > 2 ? `You keep coming back to ${genres[0].genre}` : 'Based on your listening',
+      query: `${genres[0].genre} radio mix hits`
+    });
+  }
+
+  // 3) Straight from the user's own search history
+  const tops = topSearchQueries(queries);
+  if (tops[0]) {
+    shelves.push({
+      key: 'your-search',
+      title: `Because you searched “${tops[0].slice(0, 30)}”`,
+      sub: 'Fresh picks from your history',
+      query: tops[0]
+    });
+  }
+
+  // 4) Second-strongest signals, if there is room
+  if (shelves.length < 3 && genres[1]) {
+    shelves.push({
+      key: `genre2-${genres[1].genre}`,
+      title: `${genres[1].genre} for you`,
+      sub: 'Another side of your taste',
+      query: `${genres[1].genre} hits mix`
+    });
+  }
+  if (shelves.length < 3 && tops[1]) {
+    shelves.push({
+      key: 'your-search-2',
+      title: `Also searched “${tops[1].slice(0, 30)}”`,
+      sub: 'From your search history',
+      query: tops[1]
+    });
+  }
+
+  // 5) Cold start — no signals yet: set the vibe by time of day instead
+  if (!shelves.length) {
+    const h = new Date().getHours();
+    const mood = h >= 6 && h < 12
+      ? ['Morning coffee', 'soft acoustic morning mix']
+      : h >= 12 && h < 18
+        ? ['Afternoon energy', 'upbeat pop hits mix']
+        : h >= 18 && h < 22
+          ? ['Evening wind-down', 'chill evening r&b mix']
+          : ['Late night drive', 'night drive synthwave mix'];
+    shelves.push({ key: 'mood', title: mood[0], sub: 'Picked for this moment', query: mood[1] });
+    shelves.push({ key: 'trending', title: 'Trending right now', sub: 'What everyone is playing', query: 'latest trending music hits' });
+  }
+
+  return shelves.slice(0, 3);
+}
+
+// Time-of-day vibe for the hero (recomputed each render — trivial cost)
+const VIBE = (() => {
+  const h = new Date().getHours();
+  if (h >= 6 && h < 12) return {
+    key: 'morning', greeting: 'Good Morning', mood: 'Focus & Coffee',
+    headline: 'Ease into the day.',
+    line: 'Bright, fresh acoustics and lo-fi to start your day right.',
+    grad: 'linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%)',
+    blob1: '#ffffff', blob2: '#ffd3a5', dark: false,
+    playQuery: 'bright morning acoustic mix'
+  };
+  if (h >= 12 && h < 18) return {
+    key: 'afternoon', greeting: 'Good Afternoon', mood: 'Energy Boost',
+    headline: 'Keep the energy up.',
+    line: 'Keep the momentum going with upbeat hits and viral tracks.',
+    grad: 'linear-gradient(135deg, #f6d365 0%, #fda085 100%)',
+    blob1: '#fff3b0', blob2: '#ff9a6c', dark: false,
+    playQuery: 'upbeat feel good hits mix'
+  };
+  if (h >= 18 && h < 22) return {
+    key: 'evening', greeting: 'Good Evening', mood: 'Unwind & Relax',
+    headline: 'Slow it down.',
+    line: 'Deep sunset aesthetics with smooth R&B and chill pop.',
+    grad: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    blob1: '#a18cd1', blob2: '#fbc2eb', dark: true,
+    playQuery: 'chill evening r&b mix'
+  };
+  return {
+    key: 'night', greeting: 'Late Night', mood: 'After Dark',
+    headline: 'After-hours frequency.',
+    line: 'Dark, neon-lit aesthetics highlighting synthwave and deep house.',
+    grad: 'linear-gradient(135deg, #09203f 0%, #537895 100%)',
+    blob1: '#537895', blob2: '#3d1e6d', dark: true,
+    playQuery: 'late night drive synthwave mix'
+  };
+})();
+
+// One-tap mood chips: each plays a real search-backed mix.
+// Icons are lucide SVG components (no emojis anywhere in the app).
+const MOOD_CHIPS = [
+  { icon: Snowflake, label: 'Chill', query: 'chill lofi relaxing mix' },
+  { icon: Zap, label: 'Energy', query: 'workout motivation hype mix' },
+  { icon: Headphones, label: 'Focus', query: 'deep focus instrumental study mix' },
+  { icon: HeartCrack, label: 'Heartbreak', query: 'sad heartbreak songs mix' },
+  { icon: PartyPopper, label: 'Party', query: 'party dance hits mix' },
+  { icon: Moon, label: 'Late Night', query: 'late night drive synthwave mix' }
+];
+
+// Horizontal shelf card: click = play the whole shelf as a queue
+const MediaCard = memo(({ track, list, onPlay }) => (
+  <div className="music-card" style={{ minWidth: 180, width: 180 }} onClick={() => onPlay(track, list)}>
+    <div className="card-img-wrap">
+      <img src={track.thumbnail} alt="" loading="lazy" />
+      <button className="card-play-btn" aria-label="Play"><Play size={22} fill="black" /></button>
+    </div>
+    <p className="card-title">{track.title}</p>
+    <p className="card-sub">{track.channel}</p>
+  </div>
+));
+
 function App() {
   const {
     currentTrack, playTrack, isPlaying, togglePlay,
     isScraping, progress, duration, seek, volume, setVolume,
     user, setUser, nextTrack, prevTrack,
     shuffle, setShuffle, repeat, setRepeat,
-    queue, showQueue, setShowQueue,
+    queue, setQueue, showQueue, setShowQueue,
     likedSongs, setLikedSongs, toggleLike,
     playlists, fetchPlaylists, createPlaylist, addToPlaylist,
     recentTracks,
     currentRoom, joinRoom, leaveRoom, roomParticipants, isRoomHost,
-    roomSettings, updateRoomSettings
+    roomSettings, updateRoomSettings,
+    audioRef
   } = useMusic();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -109,11 +307,21 @@ function App() {
   const [currentPage, setCurrentPage] = useState('home');
   const [isLoading, setIsLoading] = useState(false);
   const [isHomeLoading, setIsHomeLoading] = useState(false);
-  const [showAuth, setShowAuth] = useState(false);
-  const [isLogin, setIsLogin] = useState(true);
-  const [formData, setFormData] = useState({ username: '', password: '', email: '' });
   const [isFullPlayer, setIsFullPlayer] = useState(false);
-  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  // Startup animation: show until the guest session resolves (min 1.9s, hard cap 6s)
+  const [splashMinDone, setSplashMinDone] = useState(false);
+  const [splashDone, setSplashDone] = useState(false);
+  // First-launch name gate: ask what to call the user (no account, no login)
+  const [displayName, setDisplayName] = useState(() => localStorage.getItem('kettle_name') || '');
+  const [nameDraft, setNameDraft] = useState('');
+  const [showNamePrompt, setShowNamePrompt] = useState(false);
+  // Per-user taste data: real plays + searches -> personalized home shelves
+  const [listenHistory, setListenHistory] = useState([]);
+  const [searchHistory, setSearchHistory] = useState([]);
+  const [personalShelves, setPersonalShelves] = useState([]);
+  const [isTasteLoading, setIsTasteLoading] = useState(false);
+  const [tasteLoaded, setTasteLoaded] = useState(false); // history fetch attempted
+  const [showAllRecent, setShowAllRecent] = useState(false);
   const [likedSongsList, setLikedSongsList] = useState([]);
   const [featuredPlaylists, setFeaturedPlaylists] = useState([]);
   const [currentPlaylist, setCurrentPlaylist] = useState(null);
@@ -137,10 +345,16 @@ function App() {
   const [dragProgress, setDragProgress] = useState(0);
   const [updateStatus, setUpdateStatus] = useState(null); // 'available', 'downloaded'
   const [showVideo, setShowVideo] = useState(false);
-  const [videoStartTime, setVideoStartTime] = useState(0);
+  const videoRef = useRef(null);
+  const [fpCopied, setFpCopied] = useState(false);
+  const [fpIdle, setFpIdle] = useState(false);
   
   // Friends System
-  const [friends, setFriends] = useState(() => JSON.parse(localStorage.getItem('redew_friends')) || []);
+  const [friends, setFriends] = useState(() => {
+    // Corrupted localStorage must not white-screen the whole app at mount
+    try { return JSON.parse(localStorage.getItem('kettle_friends')) || []; }
+    catch { return []; }
+  });
   const [isAddingFriend, setIsAddingFriend] = useState(false);
   const [newFriendName, setNewFriendName] = useState("");
 
@@ -148,7 +362,7 @@ function App() {
     if (newFriendName.trim()) {
       const updatedFriends = [...friends, { username: newFriendName.trim(), isOnline: Math.random() > 0.5 }];
       setFriends(updatedFriends);
-      localStorage.setItem('redew_friends', JSON.stringify(updatedFriends));
+      localStorage.setItem('kettle_friends', JSON.stringify(updatedFriends));
       setNewFriendName("");
       setIsAddingFriend(false);
     }
@@ -172,40 +386,240 @@ function App() {
     } catch (e) { console.error(e); }
   };
 
-  const handleJoinRoom = async () => {
-    if (!joinCode) return;
-    await joinRoom(joinCode.toUpperCase());
-    setCurrentPage('jam');
-    setJoinCode("");
+  const searchTimerRef = useRef(null);
+  const searchReqIdRef = useRef(0);       // latest-search wins over stale responses
+
+  // --- Page back / forward history (topbar chevrons) -------------------
+  const backStackRef = useRef([]);
+  const fwdStackRef = useRef([]);
+  const navLockRef = useRef(false);        // true while a back/forward jump applies
+  const prevPageRef = useRef('home');
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoForward, setCanGoForward] = useState(false);
+
+  useEffect(() => {
+    if (currentPage === prevPageRef.current) return;
+    if (navLockRef.current) {
+      navLockRef.current = false;
+    } else {
+      backStackRef.current.push(prevPageRef.current);
+      fwdStackRef.current = [];
+    }
+    prevPageRef.current = currentPage;
+    setCanGoBack(backStackRef.current.length > 0);
+    setCanGoForward(fwdStackRef.current.length > 0);
+  }, [currentPage]);
+
+  const goBack = () => {
+    if (!backStackRef.current.length) return;
+    fwdStackRef.current.push(currentPage);
+    navLockRef.current = true;
+    setCurrentPage(backStackRef.current.pop());
+    setCanGoBack(backStackRef.current.length > 0);
+    setCanGoForward(true);
+  };
+  const goForward = () => {
+    if (!fwdStackRef.current.length) return;
+    backStackRef.current.push(currentPage);
+    navLockRef.current = true;
+    setCurrentPage(fwdStackRef.current.pop());
+    setCanGoForward(fwdStackRef.current.length > 0);
+    setCanGoBack(true);
   };
 
-  const searchTimerRef = useRef(null);
-
-  // Auth check on mount
+  // --- Startup animation timing ---------------------------------------
+  useEffect(() => { const t = setTimeout(() => setSplashMinDone(true), 1900); return () => clearTimeout(t); }, []);
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      axios.get(`${API_BASE}/users/me`, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-        .then(res => {
-          setUser(res.data);
-          setShowAuth(false);
-          if (!res.data.onboarding_completed) setShowOnboarding(true);
-        })
-        .catch(() => { localStorage.removeItem('token'); setShowAuth(true); })
-        .finally(() => setIsAuthChecking(false));
-    } else {
-      setShowAuth(true);
-      setIsAuthChecking(false);
+    if (splashMinDone && user) { const t = setTimeout(() => setSplashDone(true), 450); return () => clearTimeout(t); }
+  }, [splashMinDone, user]);
+  // First launch: nobody has a name yet — hand off from splash to the name gate
+  useEffect(() => {
+    if (splashMinDone && !displayName) {
+      const t = setTimeout(() => { setSplashDone(true); setShowNamePrompt(true); }, 450);
+      return () => clearTimeout(t);
     }
+  }, [splashMinDone, displayName]);
+  useEffect(() => { const t = setTimeout(() => setSplashDone(true), 6000); return () => clearTimeout(t); }, []);
 
-    // Electron Update Listeners
-    if (window.ipcRenderer) {
-      window.ipcRenderer.on('update_available', () => setUpdateStatus('available'));
-      window.ipcRenderer.on('update_downloaded', () => setUpdateStatus('downloaded'));
-    }
-  }, [setUser]);
+  const submitName = (e) => {
+    e.preventDefault();
+    const n = nameDraft.trim().slice(0, 24);
+    if (!n) return;
+    localStorage.setItem('kettle_name', n);
+    setDisplayName(n);
+    setShowNamePrompt(false); // kicks off the silent guest session below
+  };
+
+  // --- Silent guest session (NO login UI, ever) ------------------------
+  // First launch asks for a name (the gate above), then creates a local
+  // account whose username is derived FROM that name — no guest_xxx.
+  // Everything after that is automatic: the app is simply usable without
+  // logging in. Runs only once a display name exists.
+  useEffect(() => {
+    if (!displayName) return; // waiting on the first-launch name gate
+    let cancelled = false;
+
+    const ensureGuestSession = async (attempt = 0) => {
+      const token = localStorage.getItem('token');
+      if (token) {
+        try {
+          const me = await axios.get(`${API_BASE}/users/me`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (!cancelled) setUser(me.data);
+          return;
+        } catch { localStorage.removeItem('token'); } // stale/rotated token
+      }
+
+      // Reuse stored guest credentials — /register can only succeed once
+      let creds = null;
+      try { creds = JSON.parse(localStorage.getItem('kettle_guest')); } catch {}
+      if (!creds || !creds.username) {
+        const id = Math.random().toString(36).slice(2, 8) + Date.now().toString(36);
+        // Username derived from the name the user chose — human-readable,
+        // unique (suffix), and never the old guest_xxxxxxxxxxxx
+        const slug = displayName.toLowerCase()
+          .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 16) || 'listener';
+        creds = {
+          username: `${slug}_${id}`,
+          email: `${slug}_${id}@kettle.app`,
+          password: `k_${Math.random().toString(36).slice(2, 14)}_9`
+        };
+        localStorage.setItem('kettle_guest', JSON.stringify(creds));
+      }
+
+      let access = null;
+      try {
+        const res = await axios.post(`${API_BASE}/login`, creds);
+        access = res.data.access_token;
+      } catch {
+        try { await axios.post(`${API_BASE}/register`, creds); } catch {}
+        try {
+          const res = await axios.post(`${API_BASE}/login`, creds);
+          access = res.data.access_token;
+        } catch {}
+      }
+
+      if (cancelled) return;
+      if (!access) {
+        // Backend not up yet — the splash covers the wait; retry a few times
+        if (attempt < 12) setTimeout(() => { if (!cancelled) ensureGuestSession(attempt + 1); }, 1500);
+        return;
+      }
+
+      localStorage.setItem('token', access);
+      try {
+        const me = await axios.get(`${API_BASE}/users/me`, {
+          headers: { Authorization: `Bearer ${access}` }
+        });
+        if (cancelled) return;
+        setUser(me.data);
+        // Guests skip the onboarding modal — the homepage handles vibe selection
+        if (!me.data.onboarding_completed) {
+          axios.post(`${API_BASE}/users/onboarding`, { genres: [], artists: [] },
+            { headers: { Authorization: `Bearer ${access}` } }).catch(() => {});
+        }
+      } catch {}
+    };
+
+    ensureGuestSession();
+    return () => { cancelled = true; };
+  }, [setUser, displayName]);
+
+  // Electron Update Listeners (removed on cleanup — StrictMode mounts twice)
+  useEffect(() => {
+    if (!window.ipcRenderer) return;
+    const onAvailable = () => setUpdateStatus('available');
+    const onDownloaded = () => setUpdateStatus('downloaded');
+    window.ipcRenderer.on('update_available', onAvailable);
+    window.ipcRenderer.on('update_downloaded', onDownloaded);
+    return () => {
+      window.ipcRenderer.removeListener('update_available', onAvailable);
+      window.ipcRenderer.removeListener('update_downloaded', onDownloaded);
+    };
+  }, []);
+
+  // Clear any pending search timer on unmount
+  useEffect(() => () => clearTimeout(searchTimerRef.current), []);
+
+  // VIDEO MODE — the <audio> element NEVER stops. A muted <video> element
+  // plays the relayed video stream phase-locked to the audio: a playbackRate
+  // servo nudges the video faster or slower until drift is below the
+  // 25 ms perception threshold, then it rides exactly alongside. Seeks and
+  // track changes hard-snap the video; small drift never causes visible
+  // stutter or skipping.
+  useEffect(() => {
+    if (!showVideo) return undefined;
+    const video = videoRef.current;
+    const audio = audioRef?.current;
+    if (!video || !audio) return undefined;
+
+    video.muted = true;
+    video.playbackRate = 1;
+
+    const DEAD_ZONE = 0.012; // 12 ms — far below AV-sync perception
+    const HARD_SNAP = 0.8;   // user seeked / real network hiccup
+
+    const tick = () => {
+      const a = audio.currentTime;
+      const v = video.currentTime;
+      if (!Number.isFinite(a) || Number.isNaN(v)) return;
+      const drift = v - a;
+      if (Math.abs(drift) > HARD_SNAP) {
+        try { video.currentTime = a; } catch { /* pre-metadata */ }
+        video.playbackRate = 1;
+        return;
+      }
+      if (Math.abs(drift) <= DEAD_ZONE) {
+        // Locked — ride the clock exactly
+        if (video.playbackRate !== 1) video.playbackRate = 1;
+        return;
+      }
+      // P-control: proportional nudge, clamped to a natural band
+      video.playbackRate = Math.max(0.75, Math.min(1.25, 1 - drift * 0.8));
+    };
+
+    const mirror = () => {
+      if (!audio.paused && video.paused) {
+        // Restart — re-lock position first so a resume never shows old offset
+        try { video.currentTime = audio.currentTime; } catch { /* pre-metadata */ }
+        video.playbackRate = 1;
+        video.play().catch(() => {});
+      } else if (audio.paused && !video.paused) {
+        video.pause();
+      }
+    };
+
+    const onMetadata = () => {
+      try { video.currentTime = audio.currentTime; } catch { /* noop */ }
+      video.playbackRate = 1;
+      mirror();
+    };
+
+    const onSeek = () => {
+      try { video.currentTime = audio.currentTime; } catch { /* pre-metadata */ }
+      video.playbackRate = 1;
+    };
+
+    const interval = setInterval(tick, 150); // 6-7 Hz servo
+    video.addEventListener('loadedmetadata', onMetadata);
+    audio.addEventListener('timeupdate', tick);
+    audio.addEventListener('seeked', onSeek);
+    audio.addEventListener('play', mirror);
+    audio.addEventListener('pause', mirror);
+    // Kick off immediately at audio position
+    if (video.readyState >= 1) onMetadata();
+
+    return () => {
+      clearInterval(interval);
+      video.removeEventListener('loadedmetadata', onMetadata);
+      audio.removeEventListener('timeupdate', tick);
+      audio.removeEventListener('seeked', onSeek);
+      audio.removeEventListener('play', mirror);
+      audio.removeEventListener('pause', mirror);
+      try { video.pause(); video.playbackRate = 1; } catch { /* unmount races */ }
+    };
+  }, [showVideo, currentTrack?.id, audioRef, isFullPlayer]);
 
   const restartApp = () => {
     if (window.ipcRenderer) window.ipcRenderer.send('restart_app');
@@ -215,37 +629,70 @@ function App() {
   useEffect(() => {
     const fetchHomeData = async () => {
       setIsHomeLoading(true);
-      // Fetch trending search
-      try {
-        const searchRes = await axios.get(`${API_BASE}/search?q=latest+trending+music+hits`);
-        setHomeResults(searchRes.data.results);
-      } catch (e) { console.error("Trending search failed", e); }
 
-      // Fetch featured playlists
-      try {
-        const featRes = await axios.get(`${API_BASE}/featured-playlists`);
-        setFeaturedPlaylists(featRes.data);
-      } catch (e) { console.error("Featured playlists failed", e); }
-      
+      // Both requests fire at once — home renders as soon as the slower one lands
+      const searchTask = axios.get(`${API_BASE}/search?q=latest+trending+music+hits`)
+        .then(res => { setHomeResults(res.data.results); })
+        .catch(e => console.error("Trending search failed", e));
+
+      const featTask = axios.get(`${API_BASE}/featured-playlists`)
+        .then(res => { setFeaturedPlaylists(res.data); })
+        .catch(e => console.error("Featured playlists failed", e));
+
+      await Promise.all([searchTask, featTask]);
       setIsHomeLoading(false);
     };
     fetchHomeData();
   }, []);
 
-  const handleAuth = async (e) => {
-    e.preventDefault();
-    const endpoint = isLogin ? '/login' : '/register';
-    try {
-      const res = await axios.post(`${API_BASE}${endpoint}`, formData);
-      if (isLogin) {
-        localStorage.setItem('token', res.data.access_token);
-        const me = await axios.get(`${API_BASE}/users/me`, { headers: { Authorization: `Bearer ${res.data.access_token}` } });
-        setUser(me.data);
-        setShowAuth(false);
-        if (!me.data.onboarding_completed) setShowOnboarding(true);
-      } else { setIsLogin(true); }
-    } catch (err) { alert(err.response?.data?.detail || "Auth failed"); }
-  };
+  // Load this account's REAL history (plays + searches) — the raw taste
+  // signals that make the home page different for every single user.
+  useEffect(() => {
+    if (!user) return;
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    let cancelled = false;
+    const h = { Authorization: `Bearer ${token}` };
+    (async () => {
+      try {
+        const [lh, sh] = await Promise.all([
+          axios.get(`${API_BASE}/users/listen-history?limit=30`, { headers: h }),
+          axios.get(`${API_BASE}/users/search-history?limit=30`, { headers: h })
+        ]);
+        if (!cancelled) {
+          setListenHistory(lh.data.tracks || []);
+          setSearchHistory(sh.data.queries || []);
+        }
+      } catch (e) { console.error('history load failed', e); }
+      finally { if (!cancelled) setTasteLoaded(true); }
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
+
+  // Build + fetch the personalized shelves once the taste signals are in
+  useEffect(() => {
+    if (!user || !tasteLoaded) return;
+    const specs = buildTasteShelves({ listenHistory, searchHistory, likedSongsList });
+    if (!specs.length) { setPersonalShelves([]); setIsTasteLoading(false); return; }
+    let cancelled = false;
+    setIsTasteLoading(true);
+    Promise.all(specs.map(async spec => {
+      try {
+        if (spec.recommend) {
+          // Backend radio-mix: true vibe matching off one track
+          const r = await axios.get(`${API_BASE}/recommendations`, { params: spec.recommend });
+          return { ...spec, tracks: (r.data.results || []).slice(0, 12) };
+        }
+        const r = await axios.get(`${API_BASE}/search?q=${encodeURIComponent(spec.query)}`);
+        return { ...spec, tracks: (r.data.results || []).slice(0, 12) };
+      } catch { return { ...spec, tracks: [] }; }
+    })).then(shelves => {
+      if (cancelled) return;
+      setPersonalShelves(shelves.filter(s => s.tracks.length > 0));
+      setIsTasteLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [user, tasteLoaded, listenHistory, searchHistory, likedSongsList]);
 
   const handleOnboardingComplete = async () => {
     const token = localStorage.getItem('token');
@@ -270,7 +717,20 @@ function App() {
       setUser(prev => ({ ...prev, ...res.data }));
       setIsEditingProfile(false);
       if (editUsername && editUsername !== user.username) {
-        alert("Username updated! Please log in again if you encounter session issues.");
+        // JWT is issued for the old username — silently re-auth so the
+        // session keeps working (there is no login screen to fall back on)
+        try {
+          let creds = JSON.parse(localStorage.getItem('kettle_guest') || 'null');
+          if (creds) {
+            const r = await axios.post(`${API_BASE}/login`, {
+              ...creds, username: editUsername, email: editEmail || user.email
+            });
+            localStorage.setItem('token', r.data.access_token);
+            localStorage.setItem('kettle_guest', JSON.stringify({
+              ...creds, username: editUsername, email: editEmail || user.email
+            }));
+          }
+        } catch { /* keep old token — next launch re-registers a guest */ }
       }
     } catch (e) {
       alert(e.response?.data?.detail || "Update failed");
@@ -306,54 +766,6 @@ function App() {
     setIsEditingProfile(true);
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    setUser(null);
-    setShowAuth(true);
-  };
-
-  const handleGoogleLogin = async () => {
-    try {
-      // First, confirm the backend is up
-      const res = await axios.get(`${API_BASE}/auth/google/start`);
-      const { url, session_id } = res.data;
-      
-      console.log('Opening OAuth URL:', url);
-      
-      // Open Google login in the system browser
-      // Open Google login in the system browser
-      // This is intercepted by main process setWindowOpenHandler
-      window.open(url, '_blank');
-
-      // Poll backend until Google login completes
-      let attempts = 0;
-      const pollInterval = setInterval(async () => {
-        attempts++;
-        if (attempts > 150) { // 5 minutes timeout
-          clearInterval(pollInterval);
-          return;
-        }
-        try {
-          const pollRes = await axios.get(`${API_BASE}/auth/google/poll/${session_id}`);
-          if (pollRes.data.status === 'complete') {
-            clearInterval(pollInterval);
-            localStorage.setItem('token', pollRes.data.access_token);
-            const me = await axios.get(`${API_BASE}/users/me`, {
-              headers: { Authorization: `Bearer ${pollRes.data.access_token}` }
-            });
-            setUser(me.data);
-            setShowAuth(false);
-          }
-        } catch (e) {
-          // Ignore errors during polling
-        }
-      }, 2000);
-    } catch (error) {
-      console.error(error);
-      alert('Failed to start Google login. Please ensure the backend is running.');
-    }
-  };
-
   // Debounced search
   const onSearch = useCallback((e) => {
     const val = e.target.value;
@@ -362,18 +774,25 @@ function App() {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     if (val.length > 2) {
       setIsLoading(true);
+      const reqId = ++searchReqIdRef.current; // identify THIS request
       searchTimerRef.current = setTimeout(async () => {
         try {
           const res = await axios.get(`${API_BASE}/search?q=${encodeURIComponent(val)}`);
-        setResults(res.data.results);
-        setCurrentPage('search');
-        // Record search history
-        const token = localStorage.getItem('token');
-        if (token) axios.post(`${API_BASE}/users/search-history?q=${encodeURIComponent(val)}`, {}, { headers: { Authorization: `Bearer ${token}` } });
-      } catch (err) { console.error(err); }
-      finally { setIsLoading(false); }
+          // Only the newest request may write results/loading state
+          if (reqId !== searchReqIdRef.current) return;
+          setResults(res.data.results);
+          setCurrentPage('search');
+          // Record search history
+          const token = localStorage.getItem('token');
+          if (token) axios.post(`${API_BASE}/users/search-history?q=${encodeURIComponent(val)}`, {}, { headers: { Authorization: `Bearer ${token}` } });
+        } catch (err) { console.error(err); }
+        finally { if (reqId === searchReqIdRef.current) setIsLoading(false); }
       }, 400);
-    } else { setResults([]); setIsLoading(false); }
+    } else {
+      searchReqIdRef.current++; // invalidate in-flight requests
+      setResults([]);
+      setIsLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -421,9 +840,28 @@ function App() {
     setNewPlaylistName("");
   };
 
+  // Likes feed both the taste engine and the home "Your Favorites" list,
+  // so they load as soon as the session exists (library page re-refreshes).
+  useEffect(() => {
+    if (user) fetchLikedSongs();
+  }, [user, fetchLikedSongs]);
+
   useEffect(() => {
     if (currentPage === 'library') fetchLikedSongs();
   }, [currentPage, fetchLikedSongs]);
+
+  // Continue Listening: this session's plays first, then the server-side
+  // history (deduped by id) so the list survives restarts.
+  const continueList = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const t of [...recentTracks, ...listenHistory]) {
+      if (!t || !t.id || seen.has(t.id)) continue;
+      seen.add(t.id);
+      out.push(t);
+    }
+    return out;
+  }, [recentTracks, listenHistory]);
 
   const formatTime = (s) => {
     if (!s || isNaN(s)) return '0:00';
@@ -480,12 +918,70 @@ function App() {
   const displayProgress = isDragging ? dragProgress : progress;
   const progressPercent = duration > 0 ? (displayProgress / duration) * 100 : 0;
 
+  // VIDEO MODE — hold the screen hostage to the video: after 2.6 s without
+  // any pointer or key activity, every UI element fades away (like YouTube
+  // / Apple TV immersive mode). ANY activity brings the controls back.
+  useEffect(() => {
+    if (!(showVideo && isFullPlayer)) {
+      setFpIdle(false);
+      return undefined;
+    }
+    let timer = null;
+    const arm = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => setFpIdle(true), 2600);
+    };
+    const wake = () => { setFpIdle(false); arm(); };
+    setFpIdle(false);
+    arm();
+    window.addEventListener('mousemove', wake);
+    window.addEventListener('mousedown', wake);
+    window.addEventListener('wheel', wake);
+    window.addEventListener('keydown', wake);
+    window.addEventListener('touchstart', wake);
+    return () => {
+      if (timer) clearTimeout(timer);
+      window.removeEventListener('mousemove', wake);
+      window.removeEventListener('mousedown', wake);
+      window.removeEventListener('wheel', wake);
+      window.removeEventListener('keydown', wake);
+      window.removeEventListener('touchstart', wake);
+    };
+  }, [showVideo, isFullPlayer]);
+
+  // Escape closes the full-screen player (YouTube Music / Apple Music behavior)
+  useEffect(() => {
+    if (!isFullPlayer) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setIsFullPlayer(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isFullPlayer]);
+
   const handleVolumeClick = (e) => {
     const bar = volumeBarRef.current;
     if (!bar) return;
     const rect = bar.getBoundingClientRect();
     const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     setVolume(p);
+  };
+
+  const shareCurrent = async () => {
+    if (!currentTrack) return;
+    const url = currentTrack.link || `https://www.youtube.com/watch?v=${currentTrack.id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch { /* clipboard unavailable */ }
+    }
+    setFpCopied(true);
+    setTimeout(() => setFpCopied(false), 1800);
   };
 
 
@@ -504,8 +1000,8 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-box">
           <div className="logo" onClick={() => setCurrentPage('home')}>
-            <Disc3 size={24} className="logo-icon" />
-            <span>Redew</span>
+            <img src={logoMark} alt="Kettle" className="logo-icon" />
+            <span>Kettle</span>
           </div>
           <nav className="nav">
             <div className={`nav-item ${currentPage === 'home' ? 'active' : ''}`} onClick={() => setCurrentPage('home')}>
@@ -609,7 +1105,7 @@ function App() {
                 </div>
                 <div className="pl-item-info">
                   <p>{p.name}</p>
-                  <span>Playlist • {user?.username}</span>
+                  <span>Playlist • {displayName || user?.username}</span>
                 </div>
               </div>
             ))}
@@ -621,8 +1117,8 @@ function App() {
       <main className="main">
         <header className="topbar">
           <div className="nav-controls">
-            <button className="nav-btn"><Search size={16} style={{ transform: 'rotate(180deg)' }} /></button>
-            <button className="nav-btn"><Search size={16} /></button>
+            <button className="nav-btn" onClick={goBack} disabled={!canGoBack} aria-label="Go back"><ChevronLeft size={18} /></button>
+            <button className="nav-btn" onClick={goForward} disabled={!canGoForward} aria-label="Go forward"><ChevronRight size={18} /></button>
           </div>
 
           <div className="search-wrap">
@@ -642,10 +1138,11 @@ function App() {
                 ) : (
                   <User size={18} className="user-icon-circle" />
                 )}
-                <span className="username-text">{user.username}</span>
+                <span className="username-text">{displayName || user.username}</span>
               </div>
             ) : (
-              <button className="topbar-btn" onClick={() => setShowAuth(true)}>Log in</button>
+              // Session still warming up under the splash — no login, ever
+              <div className="user-account-trigger ghost" aria-hidden="true" />
             )}
           </div>
         </header>
@@ -654,129 +1151,159 @@ function App() {
           <AnimatePresence mode="wait">
             {currentPage === 'home' && (
               <motion.div key="home" className="home-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
-                {/* 1. Time-Adaptive Daily Vibe */}
-                <div 
-                  className="time-vibe-hero" 
-                  style={{
-                    background: new Date().getHours() >= 6 && new Date().getHours() < 12 ? 'linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%)' :
-                                new Date().getHours() >= 12 && new Date().getHours() < 18 ? 'linear-gradient(135deg, #f6d365 0%, #fda085 100%)' :
-                                new Date().getHours() >= 18 && new Date().getHours() < 22 ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' :
-                                'linear-gradient(135deg, #09203f 0%, #537895 100%)',
-                    color: new Date().getHours() >= 6 && new Date().getHours() < 18 ? '#000' : '#fff',
-                    padding: '48px', borderRadius: 'var(--radius-lg)', marginBottom: '32px', position: 'relative', overflow: 'hidden',
-                    boxShadow: '0 20px 40px rgba(0,0,0,0.3)'
-                  }}
-                >
-                  <div style={{ position: 'relative', zIndex: 2, maxWidth: '600px' }}>
-                    <h1 style={{ fontSize: '48px', fontWeight: '900', letterSpacing: '-2px', marginBottom: '8px' }}>
-                      {new Date().getHours() >= 6 && new Date().getHours() < 12 ? 'Good Morning' :
-                       new Date().getHours() >= 12 && new Date().getHours() < 18 ? 'Good Afternoon' :
-                       new Date().getHours() >= 18 && new Date().getHours() < 22 ? 'Good Evening' : 'Late Night'}
-                    </h1>
-                    <h3 style={{ fontSize: '24px', fontWeight: '800', opacity: 0.9, marginBottom: '16px' }}>
-                      {new Date().getHours() >= 6 && new Date().getHours() < 12 ? 'Focus & Coffee' :
-                       new Date().getHours() >= 12 && new Date().getHours() < 18 ? 'Energy Boost' :
-                       new Date().getHours() >= 18 && new Date().getHours() < 22 ? 'Unwind & Relax' : 'Late Night Drives'}
-                    </h3>
-                    <p style={{ fontSize: '16px', opacity: 0.8, marginBottom: '24px', lineHeight: '1.6' }}>
-                      {new Date().getHours() >= 6 && new Date().getHours() < 12 ? 'Bright, fresh acoustics and lo-fi to start your day right.' :
-                       new Date().getHours() >= 12 && new Date().getHours() < 18 ? 'Keep the momentum going with upbeat hits and viral tracks.' :
-                       new Date().getHours() >= 18 && new Date().getHours() < 22 ? 'Deep sunset aesthetics with smooth R&B and chill pop.' : 'Dark, neon-lit aesthetics highlighting synthwave and deep house.'}
+                {/* 1. VIBE HERO — time-of-day gradient + mood chips: sets the tone */}
+                <div className={`vibe-hero ${VIBE.dark ? 'dark' : ''}`} style={{ background: VIBE.grad }}>
+                  <div className="vibe-blobs" aria-hidden="true">
+                    <span style={{ background: VIBE.blob1 }} />
+                    <span style={{ background: VIBE.blob2 }} />
+                  </div>
+                  <div className="vibe-hero-content">
+                    <p className="vibe-kicker">
+                      {VIBE.greeting}{displayName ? `, ${displayName}` : ''}
+                      <span className="vibe-dot">•</span>{VIBE.mood}
                     </p>
-                    <button className="hero-play-btn" style={{ background: new Date().getHours() >= 6 && new Date().getHours() < 18 ? '#000' : '#fff', color: new Date().getHours() >= 6 && new Date().getHours() < 18 ? '#fff' : '#000' }} onClick={() => handlePlaylistClick(featuredPlaylists[0] || {query: "chill vibes"})}>
-                      <Play size={20} fill={new Date().getHours() >= 6 && new Date().getHours() < 18 ? '#fff' : '#000'} /> Play the Vibe
-                    </button>
-                  </div>
-                </div>
-
-                {/* 2. Your Daily Discovery (AI DJ) */}
-                <div className="section-header">
-                  <h2><Disc3 size={24} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '8px', color: 'var(--primary-accent)' }} /> Your Daily Discovery</h2>
-                  <span className="show-all">Refresh DJ</span>
-                </div>
-                <div className="ai-dj-scroll" style={{ display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '16px', marginBottom: '32px' }}>
-                  {[1, 2, 3, 4, 5, 6].map(i => (
-                    <div key={i} className="music-card" style={{ minWidth: '180px' }} onClick={() => handlePlaylistClick({ query: `undiscovered gem track ${i}` })}>
-                      <div className="card-img-wrap" style={{ borderRadius: '50%' }}>
-                        <img src={`https://picsum.photos/seed/${i * 10}/200`} alt="" />
-                        <button className="card-play-btn"><Play size={24} fill="black" /></button>
-                      </div>
-                      <p className="card-title" style={{ textAlign: 'center' }}>Daily Gem #{i}</p>
-                      <p className="card-sub" style={{ textAlign: 'center' }}>Hyper-personalized</p>
+                    <h1 className="vibe-title">{VIBE.headline}</h1>
+                    <p className="vibe-line">{VIBE.line}</p>
+                    <div className="mood-chips">
+                      {MOOD_CHIPS.map(m => (
+                        <button key={m.label} className="mood-chip" onClick={() => handlePlaylistClick({ name: `${m.label} Mix`, query: m.query, type: 'mood' })}>
+                          <m.icon size={16} strokeWidth={2.2} className="mood-glyph" />{m.label}
+                        </button>
+                      ))}
                     </div>
-                  ))}
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '32px', marginBottom: '40px' }}>
-                  {/* Left Column */}
-                  <div>
-                    {/* 5. Artist Spotlight of the Day */}
-                    <div className="section-header">
-                      <h2>Artist Spotlight</h2>
-                    </div>
-                    <div style={{ 
-                      background: 'linear-gradient(rgba(0,0,0,0.2), rgba(0,0,0,0.8)), url(https://i.scdn.co/image/ab6761610000e5eb4718e2d1245382117ca68d34)', 
-                      backgroundSize: 'cover', backgroundPosition: 'center', 
-                      borderRadius: 'var(--radius-lg)', padding: '32px', minHeight: '280px', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
-                      boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
-                    }}>
-                      <span style={{ background: 'var(--primary-accent)', color: '#fff', padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: '800', width: 'fit-content', marginBottom: '8px' }}>SPOTLIGHT</span>
-                      <h1 style={{ fontSize: '40px', fontWeight: '900', marginBottom: '8px' }}>The Weeknd</h1>
-                      <p style={{ color: 'rgba(255,255,255,0.8)', fontSize: '14px', maxWidth: '400px', marginBottom: '20px' }}>Did you know? "Blinding Lights" holds the record for the most streamed song in history. Dive into his curated essentials mix today.</p>
-                      <button className="btn-primary" style={{ width: 'fit-content', borderRadius: '30px', padding: '10px 24px' }} onClick={() => handlePlaylistClick({query: "The Weeknd Top Tracks"})}>Play Artist Mix</button>
-                    </div>
-
-                    {/* 6. Active Public Jam Rooms */}
-                    <div className="section-header" style={{ marginTop: '32px' }}>
-                      <h2><Users size={24} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '8px' }} /> Active Public Jams</h2>
-                    </div>
-                    {/* Render from real DB data (currently empty) */}
-                    <div className="empty-state" style={{ padding: '24px 0', border: '1px dashed var(--border)', borderRadius: 'var(--radius-md)' }}>
-                      <Users size={32} opacity={0.3} style={{ marginBottom: '8px' }} />
-                      <h4 style={{ color: 'var(--text-muted)' }}>No public jams right now</h4>
-                      <p style={{ fontSize: '12px', color: 'var(--text-dim)' }}>Be the first to start one and invite friends!</p>
+                    <div className="vibe-actions">
+                      <button className="hero-play-btn" onClick={() => handlePlaylistClick({ name: VIBE.mood, query: VIBE.playQuery, type: 'mood' })}>
+                        <Play size={18} fill="currentColor" /> Play the Vibe
+                      </button>
+                      {continueList.length > 0 && (
+                        <button className="hero-ghost-btn" onClick={() => playTrack(continueList[0], continueList)}>
+                          <Play size={15} fill="currentColor" /> Resume
+                        </button>
+                      )}
                     </div>
                   </div>
+                </div>
 
-                  {/* Right Column */}
-                  <div>
-                    {/* 4. Real-Time Top 10 Global Hits Chart */}
+                {/* 2. CONTINUE LISTENING — the user's real play history as a list */}
+                {continueList.length > 0 && (
+                  <div className="home-section">
                     <div className="section-header">
-                      <h2><span style={{ color: '#1db954' }}>#</span> Global Hits</h2>
+                      <h2><Clock size={22} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '8px', color: 'var(--primary-accent)' }} /> Continue Listening</h2>
+                      {continueList.length > 8 && (
+                        <span className="show-all" onClick={() => setShowAllRecent(v => !v)}>
+                          {showAllRecent ? 'Show less' : `Show all ${continueList.length}`}
+                        </span>
+                      )}
                     </div>
-                    <div style={{ background: 'var(--elevated)', borderRadius: 'var(--radius-lg)', padding: '16px' }}>
-                      {[
-                        { rank: 1, title: "Blinding Lights", artist: "The Weeknd", trend: "up" },
-                        { rank: 2, title: "Shape of You", artist: "Ed Sheeran", trend: "same" },
-                        { rank: 3, title: "Starboy", artist: "The Weeknd", trend: "down" },
-                        { rank: 4, title: "As It Was", artist: "Harry Styles", trend: "up" },
-                        { rank: 5, title: "Dance Monkey", artist: "Tones And I", trend: "down" }
-                      ].map(track => (
-                        <div key={track.rank} className="track-row" style={{ padding: '12px 8px' }} onClick={() => handlePlaylistClick({query: track.title + " " + track.artist})}>
-                          <span style={{ width: '20px', fontWeight: '800', color: track.rank === 1 ? 'var(--primary-accent)' : 'var(--text-muted)' }}>{track.rank}</span>
-                          <div style={{ display: 'flex', flexDirection: 'column', flex: 1, paddingLeft: '12px' }}>
-                            <span style={{ fontSize: '14px', fontWeight: '700' }}>{track.title}</span>
-                            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{track.artist}</span>
-                          </div>
-                          <span style={{ color: track.trend === 'up' ? '#1db954' : track.trend === 'down' ? '#e60000' : 'var(--text-dim)', fontSize: '16px' }}>
-                            {track.trend === 'up' ? '▲' : track.trend === 'down' ? '▼' : '−'}
-                          </span>
+                    <div className="track-list">
+                      {(showAllRecent ? continueList : continueList.slice(0, 8)).map((track, i) => (
+                        <TrackRow key={`${track.id}-${i}`} track={track} index={i} list={continueList}
+                          isActive={currentTrack?.id === track.id} isPlaying={isPlaying}
+                          isLiked={likedSongs.has(track.id)} onPlay={playTrack} onLike={toggleLike}
+                          playlists={playlists} onAddToPlaylist={addToPlaylist} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. MADE FOR YOU — different shelves for every single user,
+                    built from that account's own plays, likes and searches */}
+                <div className="home-section">
+                  <div className="section-header">
+                    <h2><Disc3 size={22} className="section-disc" /> Made for {displayName || user?.username || 'You'}</h2>
+                    <span className="show-all" style={{ cursor: 'default' }}>Personalized from your listening</span>
+                  </div>
+                  {isTasteLoading && personalShelves.length === 0 ? (
+                    <div className="h-scroll">
+                      {[0, 1, 2].map(i => (
+                        <div key={i} className="music-card skeleton-card">
+                          <div className="card-img-wrap shimmer" />
+                          <div className="skeleton-text shimmer" />
+                          <div className="skeleton-text short shimmer" />
                         </div>
                       ))}
                     </div>
+                  ) : (
+                    personalShelves.map(shelf => (
+                      <div key={shelf.key} className="shelf">
+                        <div className="shelf-head">
+                          <div>
+                            <h3>{shelf.title}</h3>
+                            <p>{shelf.sub}</p>
+                          </div>
+                        </div>
+                        <div className="h-scroll">
+                          {shelf.tracks.map(t => (
+                            <MediaCard key={t.id} track={t} list={shelf.tracks} onPlay={playTrack} />
+                          ))}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
 
-                    {/* 3. Live Social Feed */}
-                    <div className="section-header" style={{ marginTop: '32px' }}>
-                      <h2>Live Friend Activity</h2>
+                {/* 4. TRENDING — live YouTube results, the universal baseline */}
+                <div className="home-section">
+                  <div className="section-header">
+                    <h2><Flame size={22} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '8px', color: 'var(--primary-accent)' }} fill="currentColor" /> Trending Now</h2>
+                  </div>
+                  {isHomeLoading ? (
+                    <div className="h-scroll">
+                      {[0, 1, 2, 3].map(i => (
+                        <div key={i} className="music-card skeleton-card">
+                          <div className="card-img-wrap shimmer" />
+                          <div className="skeleton-text shimmer" />
+                          <div className="skeleton-text short shimmer" />
+                        </div>
+                      ))}
                     </div>
-                    {/* Render from real DB data (currently empty) */}
-                    <div className="empty-state" style={{ padding: '24px 0', border: '1px dashed var(--border)', borderRadius: 'var(--radius-md)' }}>
-                      <User size={32} opacity={0.3} style={{ marginBottom: '8px' }} />
-                      <h4 style={{ color: 'var(--text-muted)' }}>No recent activity</h4>
-                      <p style={{ fontSize: '12px', color: 'var(--text-dim)' }}>Add friends to see what they are listening to.</p>
+                  ) : (
+                    <div className="h-scroll">
+                      {homeResults.slice(0, 12).map(t => (
+                        <MediaCard key={t.id} track={t} list={homeResults} onPlay={playTrack} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 5. FEATURED PLAYLISTS — curated moods & artist radios */}
+                {featuredPlaylists.length > 0 && (
+                  <div className="home-section">
+                    <div className="section-header">
+                      <h2>Made for the Mood</h2>
+                    </div>
+                    <div className="h-scroll">
+                      {featuredPlaylists.slice(0, 12).map(p => (
+                        <div key={p.id} className="music-card" style={{ minWidth: 180, width: 180 }} onClick={() => handlePlaylistClick(p)}>
+                          <div className="card-img-wrap">
+                            <img src={p.image} alt="" loading="lazy" />
+                            <button className="card-play-btn"><Play size={22} fill="black" /></button>
+                          </div>
+                          <p className="card-title">{p.name}</p>
+                          <p className="card-sub">{p.description}</p>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                </div>
+                )}
+
+                {/* 6. YOUR FAVORITES — liked songs as a quick list */}
+                {likedSongsList.length > 0 && (
+                  <div className="home-section">
+                    <div className="section-header">
+                      <h2><Heart size={22} fill="#e60000" color="#e60000" style={{ display: 'inline', verticalAlign: 'middle', marginRight: '8px' }} /> Your Favorites</h2>
+                      <span className="show-all" onClick={() => setCurrentPage('library')}>Show all</span>
+                    </div>
+                    <div className="track-list">
+                      {likedSongsList.slice(0, 5).map((track, i) => (
+                        <TrackRow key={`${track.id}-${i}`} track={track} index={i} list={likedSongsList}
+                          isActive={currentTrack?.id === track.id} isPlaying={isPlaying}
+                          isLiked={likedSongs.has(track.id)} onPlay={playTrack} onLike={toggleLike}
+                          playlists={playlists} onAddToPlaylist={addToPlaylist} />
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="home-spacer" style={{ height: '40px' }} />
               </motion.div>
@@ -916,7 +1443,7 @@ function App() {
                     <h1 className="pl-name-big">{currentPlaylist.name}</h1>
                     <p className="pl-desc">{currentPlaylist.description}</p>
                     <div className="pl-actions">
-                      <button className="pl-play-main" onClick={() => playTrack(currentPlaylist.songs[0], currentPlaylist.songs)}>
+                      <button className="pl-play-main" disabled={!currentPlaylist.songs?.length} onClick={() => playTrack(currentPlaylist.songs[0], currentPlaylist.songs)}>
                         <Play size={24} fill="black" /> Play
                       </button>
                     </div>
@@ -956,83 +1483,6 @@ function App() {
               </motion.div>
             )}
 
-            {currentPage === 'room' && (
-              <motion.div key="room" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
-                {!currentRoom ? (
-                  <div className="room-entry">
-                    <div className="room-entry-card">
-                      <Users size={64} color="var(--primary)" />
-                      <h1>Join a Jam</h1>
-                      <p>Listen together with friends in real-time.</p>
-
-                      <div className="room-actions">
-                        <div className="join-group">
-                          <input
-                            placeholder="Enter Room Code"
-                            value={joinCode}
-                            onChange={(e) => setJoinCode(e.target.value)}
-                            maxLength={8}
-                          />
-                          <button className="btn-primary" onClick={handleJoinRoom}>Join Room</button>
-                        </div>
-
-                        <div className="divider-text">OR</div>
-
-                        <button className="btn-secondary create-room-btn" onClick={() => setIsCreatingRoom(true)}>
-                          <PlusSquare size={18} /> Create New Room
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="room-active">
-                    <div className="room-header">
-                      <div className="room-info">
-                        <p className="room-tag">Active Jam Session</p>
-                        <h1>Room Code: <span className="highlight">{currentRoom}</span></h1>
-                      </div>
-                      <button className="btn-secondary leave-btn" onClick={leaveRoom}>Leave Room</button>
-                    </div>
-
-                    <div className="room-controls-card">
-                      <h3>Room Settings</h3>
-                      <div className="setting-row">
-                        <span>Allow participants to skip</span>
-                        <div
-                          className={`toggle ${roomSettings.allowSkip ? 'active' : ''} ${!isRoomHost ? 'disabled' : ''}`}
-                          onClick={() => isRoomHost && updateRoomSettings({ allowSkip: !roomSettings.allowSkip })}
-                        ></div>
-                      </div>
-                      <div className="setting-row">
-                        <span>Allow participants to add to queue</span>
-                        <div
-                          className={`toggle ${roomSettings.allowQueue ? 'active' : ''} ${!isRoomHost ? 'disabled' : ''}`}
-                          onClick={() => isRoomHost && updateRoomSettings({ allowQueue: !roomSettings.allowQueue })}
-                        ></div>
-                      </div>
-                      <div className="setting-row">
-                        <span>Private room</span>
-                        <div
-                          className={`toggle ${roomSettings.isPrivate ? 'active' : ''} ${!isRoomHost ? 'disabled' : ''}`}
-                          onClick={() => isRoomHost && updateRoomSettings({ isPrivate: !roomSettings.isPrivate })}
-                        ></div>
-                      </div>
-                    </div>
-
-                    <div className="room-participants-list">
-                      <h3>Participants</h3>
-                      <div className="p-grid">
-                        {roomParticipants.map((p, i) => (
-                          <div key={i} className={`p-badge ${p === user?.username ? 'me' : ''}`}>
-                            <User size={14} /> <span>{p} {p === user?.username ? '(You)' : ''}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </motion.div>
-            )}
           </AnimatePresence>
         </section>
       </main>
@@ -1048,15 +1498,15 @@ function App() {
           {currentTrack ? (
             <>
               <div className="now-playing-art">
-                {showVideo ? (
-                  <iframe 
-                    width="100%" 
-                    height="100%" 
-                    src={`https://www.youtube-nocookie.com/embed/${currentTrack.id}?autoplay=1&start=${videoStartTime}&origin=https://localhost`} 
-                    frameBorder="0" 
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-                    allowFullScreen
-                    style={{ borderRadius: 'var(--radius-md)' }}
+                {showVideo && !isFullPlayer ? (
+                  <video
+                    ref={el => { videoRef.current = el; if (el) el.muted = true; }}
+                    src={`${API_BASE}/stream-video/${currentTrack.id}`}
+                    poster={currentTrack.thumbnail}
+                    muted
+                    playsInline
+                    preload="auto"
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'var(--radius-md)', background: '#000' }}
                   />
                 ) : (
                   <img src={currentTrack.thumbnail} alt="" />
@@ -1067,15 +1517,10 @@ function App() {
                 <p>{currentTrack.channel}</p>
               </div>
 
-              <button 
-                className="btn-secondary" 
+              <button
+                className="btn-secondary"
                 style={{ width: '100%', marginTop: '12px', background: 'var(--elevated)', border: '1px solid var(--border)', padding: '8px', borderRadius: '20px', color: 'var(--text)', fontWeight: 'bold', cursor: 'pointer' }}
-                onClick={() => {
-                  if (!showVideo) {
-                    setVideoStartTime(Math.floor(progress));
-                  }
-                  setShowVideo(!showVideo);
-                }}
+                onClick={() => setShowVideo(v => !v)}
               >
                 {showVideo ? 'Switch to Audio Image' : 'Switch to Video'}
               </button>
@@ -1093,17 +1538,22 @@ function App() {
                   <h4 style={{ fontSize: '14px', fontWeight: '800' }}>Next in queue</h4>
                   <span className="show-all" onClick={() => setShowQueue(true)}>Open queue</span>
                 </div>
-                {queue.length > 1 ? (
-                  <div className="pl-item" style={{ background: 'var(--elevated)', marginTop: '8px' }}>
-                    <img src={queue[1].thumbnail} style={{ width: '48px', height: '48px', borderRadius: '4px' }} alt="" />
-                    <div className="pl-item-info">
-                      <p style={{ fontSize: '13px' }}>{queue[1].title.slice(0, 30)}...</p>
-                      <span style={{ fontSize: '11px' }}>{queue[1].channel}</span>
+                {(() => {
+                  // Show the track AFTER the current one — not blindly queue[1],
+                  // which is often the currently-playing track itself
+                  const ci = queue.findIndex(t => t?.id === currentTrack?.id);
+                  const nextUp = ci >= 0 ? queue[ci + 1] : queue.find(t => t?.id !== currentTrack?.id);
+                  if (!nextUp) return <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '8px' }}>Queue is empty</p>;
+                  return (
+                    <div className="pl-item" style={{ background: 'var(--elevated)', marginTop: '8px' }}>
+                      <img src={nextUp.thumbnail} style={{ width: '48px', height: '48px', borderRadius: '4px' }} alt="" />
+                      <div className="pl-item-info">
+                        <p style={{ fontSize: '13px' }}>{nextUp.title.slice(0, 30)}...</p>
+                        <span style={{ fontSize: '11px' }}>{nextUp.channel}</span>
+                      </div>
                     </div>
-                  </div>
-                ) : (
-                  <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '8px' }}>Queue is empty</p>
-                )}
+                  );
+                })()}
               </div>
 
               <div className="friend-activity" style={{ marginTop: '32px' }}>
@@ -1139,19 +1589,6 @@ function App() {
       </aside>
 
       <AnimatePresence>
-        {isCreatingRoom && (
-          <motion.div className="modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <motion.div className="modal-content" initial={{ scale: 0.9 }} animate={{ scale: 1 }}>
-              <h2>Create Jam Room</h2>
-              <input placeholder="Room Name" value={newRoomName} onChange={e => setNewRoomName(e.target.value)} />
-              <div className="modal-actions">
-                <button className="btn-cancel" onClick={() => setIsCreatingRoom(false)}>Cancel</button>
-                <button className="btn-primary" onClick={handleCreateRoom}>Create</button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-
         {showAccountPanel && user && (
           <motion.div className="modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowAccountPanel(false)}>
             <motion.div
@@ -1175,10 +1612,10 @@ function App() {
                   {user.profile_photo ? (
                     <img src={user.profile_photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '50%' }} />
                   ) : (
-                    user.username[0].toUpperCase()
+                    (displayName || user.username)[0].toUpperCase()
                   )}
                   <div className="avatar-edit-overlay">
-                    {isUploading ? <Disc3 className="spin" size={24} /> : <Search size={20} />}
+                    {isUploading ? <Disc3 className="spin" size={24} /> : <Camera size={20} />}
                   </div>
                   <input
                     type="file"
@@ -1212,8 +1649,8 @@ function App() {
                     </div>
                   ) : (
                     <>
-                      <h1>{user.username}</h1>
-                      <p>{user.email || 'user@redew.io'}</p>
+                      <h1>{displayName || user.username}</h1>
+                      <p>{user.username !== displayName ? `@${user.username} · ` : ''}{user.email || 'user@kettle.io'}</p>
                       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                         <span className="profile-badge">Free Member</span>
                         <button className="edit-profile-btn" onClick={startEditing}>Edit Profile</button>
@@ -1231,7 +1668,7 @@ function App() {
                   </div>
                   <div className="membership-card spotify-style">
                     <div className="membership-info">
-                      <p className="plan-name">Redew Free</p>
+                      <p className="plan-name">Kettle Free</p>
                       <p className="plan-status">Ad-supported listening</p>
                     </div>
                     <button className="btn-join-premium">Join Premium</button>
@@ -1290,16 +1727,11 @@ function App() {
                     <Music2 size={18} /> <h3>Security and privacy</h3>
                   </div>
                   <div className="setting-group">
-                    <div className="setting-item"><span>Change password</span></div>
                     <div className="setting-item"><span>Manage apps</span></div>
                     <div className="setting-item"><span>Notification settings</span></div>
                     <div className="setting-item"><span>Account privacy</span></div>
-                    <div className="setting-item"><span>Edit login methods</span></div>
                     <div className="setting-item danger" onClick={() => alert("Are you sure you want to close your account?")}>
                       <span>Close account</span>
-                    </div>
-                    <div className="setting-item" onClick={() => alert("Signing out from all devices...")}>
-                      <span>Sign out everywhere</span>
                     </div>
                   </div>
                 </div>
@@ -1317,19 +1749,16 @@ function App() {
                 {/* Help */}
                 <div className="account-section">
                   <div className="section-title">
-                    <Search size={18} /> <h3>Help</h3>
+                    <LifeBuoy size={18} /> <h3>Help</h3>
                   </div>
                   <div className="setting-group">
-                    <div className="setting-item"><span>Redew support</span></div>
+                    <div className="setting-item"><span>Kettle support</span></div>
                   </div>
                 </div>
               </div>
 
               <div className="account-footer">
-                <button className="logout-button-full" onClick={() => { handleLogout(); setShowAccountPanel(false); }}>
-                  Log out
-                </button>
-                <p className="version-tag">Redew Music v1.1.0 • Clean Build</p>
+                <p className="version-tag">Kettle v1.1.0 • No login required</p>
               </div>
             </motion.div>
           </motion.div>
@@ -1504,7 +1933,8 @@ function App() {
               {isPlaying ? <Pause size={20} fill="black" color="black" /> : <Play size={20} fill="black" color="black" />}
             </button>
             <SkipForward size={20} fill="currentColor" className="ctrl-icon" onClick={nextTrack} />
-            <Repeat size={16} className={`ctrl-icon ${repeat !== 'none' ? 'active' : ''}`} onClick={() => setRepeat(repeat === 'none' ? 'all' : 'none')} />
+            {repeat === 'one' ? <Repeat1 size={16} className="ctrl-icon active" onClick={() => setRepeat('none')} /> :
+              <Repeat size={16} className={`ctrl-icon ${repeat !== 'none' ? 'active' : ''}`} onClick={() => setRepeat(repeat === 'none' ? 'all' : 'one')} />}
           </div>
           <div className="pb-progress-wrap">
             <span className="pb-time">{formatTime(progress)}</span>
@@ -1535,54 +1965,116 @@ function App() {
         </div>
       </footer>
 
-      {/* Full Screen Player */}
+      {/* FULL-SCREEN PLAYER — immersive: full-bleed video when video mode is on,
+           otherwise a cinematic blurred-art stage. Nothing else renders behind it. */}
       <AnimatePresence>
         {isFullPlayer && currentTrack && (
           <motion.div
-            className="fullscreen-player"
-            initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
-            transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+            className={`fullscreen-player ${showVideo ? 'is-video' : 'is-art'} ${fpIdle ? 'fp-idle' : ''}`}
+            role="dialog"
+            aria-label="Now playing"
+            initial={{ opacity: 0, y: 56 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 56 }}
+            transition={{ type: 'spring', damping: 32, stiffness: 280 }}
           >
-            <div className="fp-bg" style={{ backgroundImage: `url(${currentTrack.thumbnail})` }} />
-            <button className="fp-close" onClick={() => setIsFullPlayer(false)}>
-              <ChevronDown size={28} />
-            </button>
-            <div className="fp-body">
-              <motion.img
-                src={currentTrack.thumbnail}
-                className="fp-art"
-                alt=""
-                animate={{ rotate: isPlaying ? 360 : 0 }}
-                transition={{ duration: 20, repeat: Infinity, ease: 'linear' }}
-                style={{ borderRadius: '50%' }}
+            {/* Background layer */}
+            {showVideo ? (
+              <video
+                ref={el => { videoRef.current = el; if (el) el.muted = true; }}
+                className="fp-video"
+                src={`${API_BASE}/stream-video/${currentTrack.id}`}
+                poster={currentTrack.thumbnail}
+                muted
+                playsInline
+                preload="auto"
               />
-              <div className="fp-details">
-                <h1 className="fp-title">{currentTrack.title}</h1>
-                <h3 className="fp-artist">{currentTrack.channel}</h3>
+            ) : (
+              <div className="fp-backdrop" style={{ backgroundImage: `url(${currentTrack.thumbnail})` }} />
+            )}
+            <div className="fp-vignette" aria-hidden="true" />
 
-                <div className="fp-progress">
-                  <div className="progress-bar large" ref={null} onClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    seek(((e.clientX - rect.left) / rect.width) * duration);
-                  }}>
-                    <div className="progress-fill" style={{ width: `${progressPercent}%` }}>
-                      <div className="progress-knob" />
+            {/* Top bar */}
+            <header className="fp-topbar">
+              <button className="fp-icon-btn" onClick={() => setIsFullPlayer(false)} aria-label="Close player"><ChevronDown size={22} /></button>
+              <p className="fp-kicker">{showVideo ? 'Now Playing — Video' : 'Now Playing'}</p>
+              <div className="fp-top-actions">
+                <button className="fp-icon-btn" onClick={shareCurrent} aria-label={fpCopied ? 'Link copied' : 'Copy track link'}>
+                  {fpCopied ? <Check size={18} /> : <Share2 size={18} />}
+                </button>
+                <button className="fp-icon-btn" onClick={() => setShowQueue(q => !q)} aria-label="Toggle up next"><ListMusic size={18} /></button>
+              </div>
+            </header>
+
+            {/* Stage */}
+            <div className="fp-stage">
+              <div className="fp-main">
+                {!showVideo && (
+                  <div className="fp-art-wrap">
+                    <img src={currentTrack.thumbnail} className="fp-art" alt="" draggable={false} />
+                  </div>
+                )}
+                <div className="fp-info">
+                  <p className="fp-track-kicker">{showVideo ? 'Playing Video' : 'Track'}</p>
+                  <h1 className="fp-title">{(currentTrack.title || '').split('|')[0].trim()}</h1>
+                  <p className="fp-artist">{currentTrack.channel}</p>
+
+                  <div
+                    className="fp-seek"
+                    role="slider"
+                    aria-label="Seek"
+                    aria-valuemin={0}
+                    aria-valuemax={Math.floor(duration || 0)}
+                    aria-valuenow={Math.floor(progress || 0)}
+                    tabIndex={0}
+                    onClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const p = Math.max(0, Math.min(rect.width, e.clientX - rect.left)) / rect.width;
+                      seek(p * (duration || 0));
+                    }}
+                  >
+                    <div className="fp-seek-fill" style={{ width: `${progressPercent}%` }}>
+                      <div className="fp-seek-knob" />
                     </div>
                   </div>
                   <div className="fp-times">
-                    <span>{formatTime(progress)}</span>
+                    <span>{formatTime(displayProgress)}</span>
                     <span>{formatTime(duration)}</span>
                   </div>
-                </div>
 
-                <div className="fp-controls">
-                  <Shuffle size={20} className={`ctrl-icon ${shuffle ? 'active' : ''}`} onClick={() => setShuffle(!shuffle)} />
-                  <SkipBack size={28} fill="white" className="ctrl-icon" onClick={prevTrack} />
-                  <button className="play-btn large" onClick={togglePlay}>
-                    {isPlaying ? <Pause size={28} fill="black" color="black" /> : <Play size={28} fill="black" color="black" />}
-                  </button>
-                  <SkipForward size={28} fill="white" className="ctrl-icon" onClick={nextTrack} />
-                  <Repeat size={20} className={`ctrl-icon ${repeat !== 'none' ? 'active' : ''}`} onClick={() => setRepeat(repeat === 'none' ? 'all' : 'none')} />
+                  <div className="fp-transport">
+                    <Shuffle size={20} className={`fp-ghost ${shuffle ? 'active' : ''}`} onClick={() => setShuffle(s => !s)} role="button" aria-label="Shuffle" />
+                    <SkipBack size={26} fill="white" className="fp-skip" onClick={prevTrack} aria-label="Previous" />
+                    <button className="fp-play" onClick={togglePlay} aria-label={isPlaying ? 'Pause' : 'Play'}>
+                      {isPlaying ? <Pause size={30} fill="#060606" color="#060606" /> : <Play size={30} fill="#060606" color="#060606" style={{ marginLeft: 3 }} />}
+                    </button>
+                    <SkipForward size={26} fill="white" className="fp-skip" onClick={nextTrack} aria-label="Next" />
+                    {repeat === 'one'
+                      ? <Repeat1 size={20} className="fp-ghost active" onClick={() => setRepeat('none')} role="button" aria-label="Repeat one" />
+                      : <Repeat size={20} className={`fp-ghost ${repeat !== 'none' ? 'active' : ''}`} onClick={() => setRepeat(repeat === 'none' ? 'all' : 'one')} role="button" aria-label="Repeat" />}
+                  </div>
+
+                  <div className="fp-secondary">
+                    <button className="fp-pill" onClick={() => setShowVideo(v => !v)}>
+                      <MonitorPlay size={16} /> {showVideo ? 'Video on' : 'Switch to video'}
+                    </button>
+                    <button
+                      className="fp-pill fp-pill-icon"
+                      onClick={() => toggleLike(currentTrack)}
+                      aria-pressed={likedSongs.has(currentTrack.id)}
+                      aria-label="Like track"
+                    >
+                      <Heart
+                        size={17}
+                        fill={likedSongs.has(currentTrack.id) ? 'currentColor' : 'none'}
+                        color={likedSongs.has(currentTrack.id) ? 'var(--primary-accent)' : 'currentColor'}
+                      />
+                    </button>
+                    <label className="fp-volume" aria-label="Volume">
+                      <Volume2 size={17} />
+                      <input type="range" min="0" max="1" step="0.05" value={volume} onChange={e => setVolume(parseFloat(e.target.value))} aria-label="Volume" />
+                    </label>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1590,41 +2082,85 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* Auth Modal */}
-      {showAuth && !isAuthChecking && (
-        <div className="auth-overlay">
-          <div className="auth-modal">
-            <div className="auth-brand">
-              <Disc3 size={56} className="auth-logo" />
-              <h1>REDEW</h1>
-              <p>Music. Redefined.</p>
+      {/* STARTUP ANIMATION — minimalist: logo, wordmark, thin progress */}
+      <AnimatePresence>
+        {!splashDone && (
+          <motion.div
+            className="splash"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.55, ease: 'easeInOut' }}
+          >
+            <div className="splash-center">
+              <motion.div
+                className="splash-logo-wrap"
+                initial={{ scale: 0.85, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+              >
+                <img src={logoMark} alt="" className="splash-logo" />
+              </motion.div>
+              <motion.h1
+                className="splash-word"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.3, duration: 0.6 }}
+              >KETTLE</motion.h1>
+              <motion.p
+                className="splash-tag"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.6, duration: 0.6 }}
+              >Music. Redefined.</motion.p>
             </div>
-            <div className="auth-form-side">
-              <h2>{isLogin ? "Welcome back" : "Join Redew"}</h2>
-              <button onClick={handleGoogleLogin} className="google-btn">
-                <svg width="18" height="18" viewBox="0 0 48 48">
-                  <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z" />
-                  <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z" />
-                  <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.519-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z" />
-                  <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z" />
-                </svg>
-                Continue with Google
+            <div className="splash-progress" aria-hidden="true">
+              <motion.div
+                className="splash-progress-fill"
+                initial={{ scaleX: 0 }}
+                animate={{ scaleX: 1 }}
+                transition={{ duration: 5.6, ease: 'linear' }}
+              />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* NAME GATE — first launch only: what should we call you?
+          No account, no password — one field, then straight into the app. */}
+      <AnimatePresence>
+        {showNamePrompt && (
+          <motion.div
+            className="name-gate"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.4 }}
+          >
+            <motion.form
+              className="name-card"
+              onSubmit={submitName}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <img src={logoMark} alt="" className="name-logo" />
+              <h2>What should we call you?</h2>
+              <p>We'll set up your library as <strong>{nameDraft.trim() || '…'}</strong> — no account needed.</p>
+              <input
+                autoFocus
+                value={nameDraft}
+                onChange={e => setNameDraft(e.target.value)}
+                placeholder="Your name"
+                maxLength={24}
+                aria-label="Your name"
+              />
+              <button type="submit" disabled={!nameDraft.trim()}>
+                Start listening
               </button>
-              <div className="auth-divider"><span>or</span></div>
-              <form onSubmit={handleAuth}>
-                {!isLogin && <input placeholder="Email" type="email" value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} />}
-                <input placeholder="Username" value={formData.username} onChange={e => setFormData({ ...formData, username: e.target.value })} />
-                <input placeholder="Password" type="password" value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} />
-                <button type="submit" className="submit-btn">{isLogin ? 'Log In' : 'Sign Up'}</button>
-              </form>
-              <p className="toggle-auth" onClick={() => setIsLogin(!isLogin)}>
-                {isLogin ? "Don't have an account? Sign up" : "Already have an account? Log in"}
-              </p>
-              <button className="guest-btn" onClick={() => setShowAuth(false)}>Continue as Guest</button>
-            </div>
-          </div>
-        </div>
-      )}
+            </motion.form>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Update Notification */}
       <AnimatePresence>

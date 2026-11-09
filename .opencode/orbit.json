@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "workspace": {
+    "name": "Redew",
+    "createdAt": 1784201048857,
+    "preset": "starter"
+  },
+  "authorizedRoots": [
+    "C:\\Users\\Anirudh\\Desktop\\Redew\\Redew"
+  ],
+  "reload": null
+}

@@ -10,18 +10,12 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  http: ^1.2.0
-  web_socket_channel: ^3.0.0
   provider: ^6.1.0
   shared_preferences: ^2.3.0
   just_audio: ^0.9.39
-  url_launcher: ^6.3.0
   cached_network_image: ^3.4.0
-  google_sign_in: ^6.2.0
-  flutter_dotenv: ^5.2.0
-  webview_flutter: ^4.10.0
+  http: ^1.2.0
   youtube_explode_dart: ^2.3.0
-  flutter_secure_storage: ^9.2.0
 
 dev_dependencies:
   flutter_test:
@@ -30,5 +24,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - .env

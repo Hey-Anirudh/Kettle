@@ -9,15 +9,33 @@ import sys
 def get_db_path():
     if getattr(sys, 'frozen', False):
         # Running in a bundle (e.g. PyInstaller)
-        app_data = os.path.join(os.getenv('APPDATA', os.path.expanduser('~')), 'RedewMusic')
-        if not os.path.exists(app_data):
-            os.makedirs(app_data)
-        return os.path.join(app_data, 'shakky_music.db')
+        base_app_data = os.getenv('APPDATA', os.path.expanduser('~'))
+        kettle_dir = os.path.join(base_app_data, 'Kettle')
+        os.makedirs(kettle_dir, exist_ok=True)
+        db_file = os.path.join(kettle_dir, 'kettle_music.db')
+
+        # Auto-migrate from old Redew database if it exists and new one does not
+        old_db_file = os.path.join(base_app_data, 'RedewMusic', 'shakky_music.db')
+        if not os.path.exists(db_file) and os.path.exists(old_db_file):
+            try:
+                import shutil
+                shutil.copy2(old_db_file, db_file)
+            except Exception:
+                pass
+
+        return db_file
     return os.path.abspath("./shakky_music.db")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     DATABASE_URL = f"sqlite+aiosqlite:///{get_db_path()}"
+else:
+    # Render (and Heroku-style) hand out bare postgres:// / postgresql:// URLs,
+    # but SQLAlchemy's async engine needs the +asyncpg driver marker
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL[len("postgres://"):]
+    elif DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL[len("postgresql://"):]
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = sessionmaker(
