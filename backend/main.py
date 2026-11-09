@@ -98,6 +98,13 @@ class LikeRequest(BaseModel):
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+# Override on the shared cloud (Render) with the public callback URL.
+# Default keeps the bundled local backend flow working for development.
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/auth/google/callback")
+
+
+def google_oauth_configured() -> bool:
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
 async def get_optional_user(token: Optional[str] = Depends(oauth2_scheme_optional)):
     """Returns username if authenticated, None otherwise (never 401s)"""
@@ -191,6 +198,17 @@ def _user_public(user, mut: bool = False):
         "is_online": _is_online(user),
     }
 
+
+def _discoverable():
+    """Social discovery predicate.
+
+    Excludes (a) throwaway/test usernames created through the API and
+    (b) accounts that never finished onboarding (no genres picked — no
+    taste to overlap). Friend links, code-based adding and Jam invites are
+    unaffected; only discovery lists use this.
+    """
+    return (User.onboarding_completed == True) & (~func.lower(User.username).like(r'test\_%'))
+
 class FriendRequest(BaseModel):
     friend_code: Optional[str] = None
     username: Optional[str] = None
@@ -257,10 +275,12 @@ async def search_users(
         code_clause = func.upper(User.friend_code).like(f"{normalized_code}%")
     else:
         code_clause = False
+    # Code lookup works for everyone (friends add each other without picking
+    # genres); name-substring browsing only sees completed, real accounts.
     stmt = select(User).where(
         User.id != me.id,
         or_(
-            func.lower(User.username).like(f"%{q_l}%"),
+            func.lower(User.username).like(f"%{q_l}%") & _discoverable(),
             code_clause,
         ),
     ).order_by(User.last_seen.desc().nulls_last()).limit(20)
@@ -448,8 +468,9 @@ async def suggested_friends(
     rows_q = await db.execute(
         select(User).where(
             User.id != me.id,
+            _discoverable(),
             ~User.id.in_(touched) if touched else True,
-        ).order_by(User.last_seen.desc()).limit(80)
+        ).order_by(User.last_seen.desc().nulls_last()).limit(80)
     )
     rows = rows_q.scalars().all()
 
@@ -1251,7 +1272,6 @@ import uuid as _uuid
 import hashlib
 import base64
 pending_google_auth = {}
-GOOGLE_REDIRECT_URI = "http://127.0.0.1:8000/auth/google/callback"
 
 def generate_pkce():
     verifier = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8').replace('=', '')
@@ -1260,6 +1280,10 @@ def generate_pkce():
 
 @app.get("/auth/google/start")
 async def google_auth_start():
+    if not google_oauth_configured():
+        # Clear, actionable signal so the frontend can show a friendly
+        # fallback instead of a broken consent page
+        raise HTTPException(status_code=503, detail="google_oauth_not_configured")
     session_id = str(_uuid.uuid4())[:12]
     verifier, challenge = generate_pkce()
     pending_google_auth[session_id] = {"status": "pending", "verifier": verifier}
@@ -1278,11 +1302,24 @@ async def google_auth_start():
     return {"url": google_auth_url, "session_id": session_id}
 
 @app.get("/auth/google/callback")
-async def google_auth_callback(code: str, state: str):
+async def google_auth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
     from fastapi.responses import HTMLResponse
     # json.dumps escapes quotes/backslashes so attacker-controlled query params
     # can't break out of the JS string literal (XSS)
     import json as _json
+    if error or not code or not state:
+        msg = error or ("missing code" if not code else "missing state")
+        return HTMLResponse(content=(
+            "<!DOCTYPE html><html><head><title>Kettle - Sign In</title>"
+            "<style>body{background:#121212;color:#fff;font-family:'Segoe UI',sans-serif;"
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0}"
+            ".card{text-align:center;padding:40px;max-width:420px}.err{color:#e74c3c}"
+            "p{color:#b3b3b3;font-size:14px}</style></head><body>"
+            "<div class='card'><h1 class='err'>Login Failed</h1>"
+            f"<p>Google returned: {_json.dumps(str(msg))[1:-1]}</p>"
+            "<p>Close this window and tap your name in Kettle instead.</p>"
+            "</div></body></html>"
+        ), status_code=400)
     code_js = _json.dumps(code)
     state_js = _json.dumps(state)
     # We have the code, now we tell the client to complete the exchange
@@ -1331,6 +1368,8 @@ class GoogleCompleteRequest(BaseModel):
 
 @app.post("/auth/google/complete")
 async def google_auth_complete(req: GoogleCompleteRequest, db: AsyncSession = Depends(get_db)):
+    if not google_oauth_configured():
+        raise HTTPException(status_code=503, detail="google_oauth_not_configured")
     if req.session_id not in pending_google_auth:
         raise HTTPException(status_code=400, detail="Invalid session")
     

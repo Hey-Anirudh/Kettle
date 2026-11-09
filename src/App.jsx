@@ -671,11 +671,15 @@ function App() {
       try { localStorage.setItem('kettle_google_pending', data.session_id); } catch {}
       try { window.open(data.url, '_blank', 'popup,width=520,height=640')?.focus?.(); } catch { /* popup blocked — user can still click link */ }
       pollGoogleAuth(data.session_id);
-    } catch {
+    } catch (err) {
       const hasSession = !!localStorage.getItem('token');
-      const msg = hasSession
-        ? "Google sign-in is unavailable right now. Your name account stays fully usable. Enable Google sign-in in Render (see .env.production) — or ask for details."
-        : 'Google sign-in is unavailable right now. Try the guest name instead.';
+      const detail = err?.response?.data?.detail;
+      const msg =
+        detail === 'google_oauth_not_configured'
+          ? 'Google sign-in is not enabled on this server yet. Tap your name instead — it’s a full account.'
+          : hasSession
+            ? 'Google sign-in is unavailable right now. Your name account stays fully usable.'
+            : 'Google sign-in is unavailable right now. Try your name instead.';
       if (hasSession) alert(msg); else setGoogleAuthError(msg);
       setIsGoogleSigning(false);
     }

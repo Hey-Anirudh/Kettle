@@ -34,10 +34,6 @@
       {
         "from": "backend/dist/backend.exe",
         "to": "backend.exe"
-      },
-      {
-        "from": "backend/.env",
-        "to": ".env"
       }
     ],
     "win": {
