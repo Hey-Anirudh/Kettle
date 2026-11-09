@@ -915,7 +915,7 @@ async def prefetch(video_id: str):
     return {"status": "warmed" if url else "failed", "video_id": video_id}
 
 @app.get("/stream/{video_id}")
-async def stream(video_id: str, title: Optional[str] = None, request: Optional[Request] = None, username: str = Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+async def stream(video_id: str, title: Optional[str] = None, request: Request = None, username: str = Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     _require_video_id(video_id)
     # History is recorded ONLY when the stream is actually servable, so
     # failed streams and browser re-requests don't inflate play counts.
