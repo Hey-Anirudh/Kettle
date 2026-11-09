@@ -5,7 +5,7 @@ import {
   PlusSquare, ListMusic, Maximize2, ChevronDown, X, Clock, Disc3, Users, Share2, UserPlus,
   ChevronLeft, ChevronRight, Camera, LifeBuoy,
   Snowflake, Zap, Headphones, HeartCrack, PartyPopper, Moon, Flame,
-  MonitorPlay, Check
+  MonitorPlay, Check, RefreshCw
 } from 'lucide-react';
 import axios from 'axios';
 import logoMark from './assets/logo-mark.png';
@@ -592,6 +592,20 @@ function App() {
       return () => clearTimeout(t);
     }
   }, [splashMinDone, displayName]);
+  // Friends pending-state helper: re-pull the session from the shared cloud.
+  // Once the next backend deploy ships friend codes, this resolves the
+  // pending card without an app update.
+  const refreshSessionFromCloud = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+      const { data } = await axios.get(`${API_BASE}/users/me`, { headers: { Authorization: `Bearer ${token}` } });
+      setUser(data);
+    } catch {
+      alert('Friend sync is not live on the shared server yet — it ships with the next backend deploy.');
+    }
+  };
+
   useEffect(() => { const t = setTimeout(() => setSplashDone(true), 6000); return () => clearTimeout(t); }, []);
 
   const submitName = (e) => {
@@ -1347,9 +1361,9 @@ function App() {
               ))}
               {friends.length === 0 && friendRequests.length === 0 && !ownFriendCode && (
                 <div className="friend-code-pending">
-                  <p>Friend sync needs a quick sign-in</p>
-                  <button className="friend-code-google-btn" onClick={signInWithGoogle}>
-                    <GoogleIcon size={18} /> Sign in with Google
+                  <p>Friend sync ships with the next cloud update. Check again after it deploys.</p>
+                  <button className="friend-code-google-btn" onClick={refreshSessionFromCloud}>
+                    <RefreshCw size={16} /> Check again
                   </button>
                 </div>
               )}
