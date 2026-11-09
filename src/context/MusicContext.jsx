@@ -28,6 +28,7 @@ export const MusicProvider = ({ children }) => {
     allow_add_to_queue: true,
     private_room: false
   });
+  const [roomStatus, setRoomStatus] = useState('idle'); // idle | connecting | connected | error
   const wsRef = useRef(null);
   const isSyncingRef = useRef(false);
   
@@ -454,16 +455,22 @@ export const MusicProvider = ({ children }) => {
 
   const joinRoom = useCallback(async (roomCode) => {
     if (wsRef.current) wsRef.current.close();
-    
-    let isHost = false;
-    try {
-      const roomRes = await fetch(`${API_BASE}/rooms/${roomCode}`);
-      const roomData = await roomRes.json();
-      isHost = user && roomData.host_id === user.id;
-      setIsRoomHost(isHost);
-    } catch (e) { console.error("Failed to fetch room info", e); }
+    setRoomStatus('connecting');
 
+    let isHost = false;
     const token = localStorage.getItem('token');
+    if (token) {
+      try {
+        const roomRes = await fetch(`${API_BASE}/rooms/${roomCode}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const roomData = await roomRes.json();
+        // Check whether I am the host of this room — drive UX affordances
+        isHost = user && roomData.host_id === user.id;
+        setIsRoomHost(isHost);
+      } catch (e) { console.error("Failed to fetch room info", e); }
+    }
+
     if (!token) return; // Jam needs a session — the Join button guards this too
     const ws = new WebSocket(`${WS_BASE}/ws/room/${roomCode}?token=${encodeURIComponent(token)}`);
     wsRef.current = ws;
@@ -539,12 +546,15 @@ export const MusicProvider = ({ children }) => {
     };
 
     // If the server drops the connection, clear ghost room state
+    ws.onopen = () => setRoomStatus('connected');
+    ws.onerror = () => setRoomStatus('error');
     ws.onclose = () => {
       if (wsRef.current === ws) {
         wsRef.current = null;
         setCurrentRoom(null);
         setRoomParticipants([]);
         setIsRoomHost(false);
+        setRoomStatus('idle');
       }
     };
 
@@ -563,6 +573,7 @@ export const MusicProvider = ({ children }) => {
     setCurrentRoom(null);
     setRoomParticipants([]);
     setIsRoomHost(false);
+    setRoomStatus('idle');
   }, []);
 
   const addToPlaylist = useCallback(async (playlistId, track) => {
@@ -706,6 +717,7 @@ export const MusicProvider = ({ children }) => {
     recentTracks, setRecentTracks,
     currentRoom, joinRoom, leaveRoom,
     roomParticipants, isRoomHost, roomSettings, updateRoomSettings,
+    roomStatus,
     audioRef
   };
 

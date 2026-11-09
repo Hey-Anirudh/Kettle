@@ -1815,6 +1815,23 @@ body {
   margin-bottom: 8px;
   box-shadow: 0 0 10px var(--primary-glow);
 }
+.jam-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 10px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  letter-spacing: 0.4px;
+  text-transform: none;
+}
+.jam-status-pill--warn {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+}
 
 .jam-title-block h1 { font-size: 48px; font-weight: 900; letter-spacing: -1px; }
 

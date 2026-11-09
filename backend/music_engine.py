@@ -263,11 +263,13 @@ class MusicEngine:
         self._stream_cache.pop(video_id, None)
 
     async def get_video_source(self, video_id: str) -> Optional[Tuple[str, dict]]:
-        """Return (url, http_headers) for the best ≤1080p video format, cached.
+        """Return (url, http_headers) for a lean ≤480p/360p video, cached.
 
         A video-only DASH format is fine: the <video> element we feed is
         muted — the audio element plays the soundtrack — so no audio codec
-        is required on this stream.
+        is required on this stream. We deliberately target SD/MP4 H.264,
+        not 1080p — an 80 MB buffer takes too long to start on slow links
+        and triggers 'video not available' on flaky connections.
         """
         cached = self._video_cache.get(video_id)
         if cached and time.time() < cached[2]:
@@ -277,12 +279,10 @@ class MusicEngine:
 
         def _extract(client):
             ydl_opts = {
-                # Top video quality: direct 1080p mp4 video-only stream, H.264
-                # preferred over AV1 (flawless decode in Chromium everywhere,
-                # including machines without an AV1 decoder). No muxed formats
-                # are offered by YouTube anymore; direct https URLs only —
-                # never m3u8 playlists, which the closed-range relay cannot carry.
-                'format': 'bestvideo[height<=1080][ext=mp4][protocol=https][vcodec^=avc]/bestvideo[height<=1080][ext=mp4][protocol=https]/bestvideo[height<=1080][protocol=https]',
+                # Lean SD video: direct 360/480p mp4, H.264 first (Chromium
+                # decodes it universally); AV1 video-only as a fallback.
+                # Smaller buffer = first frame much sooner on slow connections.
+                'format': 'bestvideo[height<=480][ext=mp4][protocol=https][vcodec^=avc]/bestvideo[height<=360][ext=mp4][protocol=https][vcodec^=avc]/bestvideo[height<=480][ext=mp4][protocol=https]/bestvideo[height<=360][ext=mp4][protocol=https]/bestvideo[height<=480][protocol=https]',
                 'quiet': True,
                 'no_warnings': True,
                 'force_generic_extractor': False,
