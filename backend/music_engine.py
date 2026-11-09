@@ -394,7 +394,30 @@ class MusicEngine:
                             headers={**headers, "Range": f"bytes={pos}-{chunk_end}"},
                         ) as r:
                             logger.debug(f"relay chunk {video_id} bytes={pos}-{chunk_end} -> {r.status_code}")
-                            if r.status_code == 206:
+                            if r.status_code == 206 or r.status_code == 200:
+                                if r.status_code == 200:
+                                    # Edge ignored the Range and is streaming the
+                                    # whole body with no Content-Range header —
+                                    # we must slice the bytes we need out of the
+                                    # full body ourselves, otherwise the client
+                                    # receives wrong bytes under a Range promise.
+                                    span_start, span_end = pos, chunk_end + 1
+                                    skipped = 0
+                                    delivered = 0
+                                    async for block in r.aiter_bytes():
+                                        block_start = skipped
+                                        skipped += len(block)
+                                        lo = max(block_start, span_start)
+                                        hi = min(skipped, span_end)
+                                        if hi > lo:
+                                            yield block[lo - block_start: hi - block_start]
+                                            delivered += hi - lo
+                                    pos = span_start + delivered
+                                    logger.debug(f"relay range-ignored fallback {video_id} delivered {delivered}")
+                                    if delivered == 0:
+                                        raise httpx.HTTPError("empty 200 body")
+                                    retries = 0
+                                    continue
                                 received = 0
                                 async for block in r.aiter_bytes():
                                     received += len(block)

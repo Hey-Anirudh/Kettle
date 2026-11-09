@@ -83,6 +83,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # New tokens carry an immutable uid claim — resolve identity from it.
+        # Old tokens only had sub=username; fall back to that for compatibility.
+        uid = payload.get("uid")
+        if uid is not None:
+            try:
+                uid_int = int(uid)
+            except (TypeError, ValueError):
+                raise credentials_exception
+            from database import async_session
+            from models import User
+            async with async_session() as session:
+                user = await session.get(User, uid_int)
+            if user is None:
+                raise credentials_exception
+            return user.username
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception

@@ -21,12 +21,13 @@ from auth import (
     get_current_user, oauth2_scheme, oauth2_scheme_optional,
     SECRET_KEY, ALGORITHM,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from jose import JWTError, jwt
 
 import asyncio
 import time
+import re
 from datetime import datetime, timedelta
 
 # Load .env from either the bundled location (next to the PyInstaller exe,
@@ -77,10 +78,12 @@ music_engine = MusicEngine(engine_config)
 async def on_startup():
     await init_db()
 
-class UserCreate(BaseModel):
-    username: str
-    email: str
-    password: str
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32, pattern=r'^[A-Za-z0-9_.-]+$')
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=128)
+
+UserCreate = RegisterRequest
 
 class Token(BaseModel):
     access_token: str
@@ -130,14 +133,22 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Username or email already registered")
     return {"message": "User created successfully"}
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+# Note: /login used to force the register schema (username/email/password).
+# The split model keeps email out of the login contract; extra fields sent
+# by legacy clients are silently ignored by pydantic.
+
 @app.post("/login", response_model=Token)
-async def login(form_data: UserCreate, db: AsyncSession = Depends(get_db)):
+async def login(form_data: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).filter(User.username == form_data.username))
     user = result.scalars().first()
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
-    
-    access_token = create_access_token(data={"sub": user.username})
+
+    access_token = create_access_token(data={"sub": user.username, "uid": str(user.id)})
     return {"access_token": access_token, "token_type": "bearer"}
 
 # Generate a unique, human-shareable friend code like "KT-AB4FCK" â€” 6 chars
@@ -147,10 +158,8 @@ _FRIEND_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 def _generate_friend_code() -> str:
     import random
-    for _ in range(10):
-        body = "".join(random.choice(_FRIEND_ALPHABET) for _ in range(6))
-        return f"KT-{body}"
-    return f"KT-{int(time.time() * 1000000) % (36 ** 6):06X}"
+    from datetime import timezone
+    return f"KT-{''.join(random.choice(_FRIEND_ALPHABET) for _ in range(6))}"
 
 async def _ensure_friend_code(user, db: AsyncSession):
     if user.friend_code:
@@ -186,6 +195,11 @@ def _user_public(user, mut: bool = False):
     }
 
 
+def _escape_like(value: str) -> str:
+    """Escape user input for SQL LIKE (backslash-escaped, case already handled)."""
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
 def _discoverable():
     """Social discovery predicate.
 
@@ -194,7 +208,7 @@ def _discoverable():
     taste to overlap). Friend links, code-based adding and Jam invites are
     unaffected; only discovery lists use this.
     """
-    return (User.onboarding_completed == True) & (~func.lower(User.username).like(r'test\_%'))
+    return (User.onboarding_completed == True) & (~func.lower(User.username).startswith('test_'))
 
 class FriendRequest(BaseModel):
     friend_code: Optional[str] = None
@@ -216,10 +230,28 @@ async def read_users_me(username: str = Depends(get_current_user), db: AsyncSess
     user = result.scalars().first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    await _ensure_friend_code(user, db)
-    user.last_seen = datetime.utcnow()
-    await db.commit()
-    await db.refresh(user)
+    just_generated = user.friend_code is None
+    if just_generated:
+        await _ensure_friend_code(user, db)
+    now = datetime.utcnow()
+    stale = (user.last_seen is None) or ((now - user.last_seen).total_seconds() > 60)
+    if stale:
+        user.last_seen = now
+    if stale or just_generated:
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Lost a friend_code race with a concurrent /users/me — retry once
+            await db.rollback()
+            if just_generated:
+                await _ensure_friend_code(user, db)
+                if stale:
+                    user.last_seen = now
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    await db.rollback()  # another writer won; code is set now
+        await db.refresh(user)
     friend_count = (await db.execute(select(func.count()).select_from(Friendship).filter(
         Friendship.status == 'accepted',
         ((Friendship.requester_id == user.id) | (Friendship.addressee_id == user.id))
@@ -255,11 +287,15 @@ async def search_users(
     if not q_l:
         return []
     # Friend-code lookup: accept "ktfp868s", "kt-fp868s", "FP868S", full codes,
-    # or just the random tail ("fp868s"). All resolve to "KT-FP868SX%" LIKE.
-    scrub = q_l.replace("-", "").replace("kt", "")
+    # or just the random tail. Strip dashes, then only a LEADING "kt" (the
+    # body itself contains K and T freely). Escape LIKE wildcards throughout.
+    scrub = q_l.replace("-", "")
+    if scrub.startswith("kt"):
+        scrub = scrub[2:]
+    q_esc = _escape_like(q_l)
+    code_token = "KT-" + _escape_like(scrub.upper()) + "%"
     if scrub and len(scrub) >= 2:
-        normalized_code = f"KT-{scrub.upper()}"
-        code_clause = func.upper(User.friend_code).like(f"{normalized_code}%")
+        code_clause = func.upper(User.friend_code).like(code_token, escape='\\')
     else:
         code_clause = False
     # Code lookup works for everyone (friends add each other without picking
@@ -267,7 +303,7 @@ async def search_users(
     stmt = select(User).where(
         User.id != me.id,
         or_(
-            func.lower(User.username).like(f"%{q_l}%") & _discoverable(),
+            func.lower(User.username).like(f"%{q_esc}%", escape='\\') & _discoverable(),
             code_clause,
         ),
     ).order_by(User.last_seen.desc().nulls_last()).limit(20)
@@ -286,9 +322,12 @@ async def send_friend_request(
 
     target = None
     if data.friend_code:
-        clean = data.friend_code.upper().replace("-", "").lstrip("KT").strip()
-        normalized = f"KT-{clean if clean else ''}"
-        target = (await db.execute(select(User).where(User.friend_code == normalized))).scalars().first()
+        # Strip dashes/spaces, then only a LEADING "KT" — body letters K/T are fine
+        scrub = data.friend_code.upper().replace("-", "").replace(" ", "")
+        if scrub.startswith("KT"):
+            scrub = scrub[2:]
+        normalized = f"KT-{scrub}"
+        target = (await db.execute(select(User).where(func.upper(User.friend_code) == normalized))).scalars().first()
     elif data.username:
         target = (await db.execute(select(User).where(User.username == data.username))).scalars().first()
     else:
@@ -547,6 +586,34 @@ def _fmt_duration(secs):
     return f"{secs // 60}:{secs % 60:02d}"
 
 
+# YouTube IDs are exactly 11 chars from [A-Za-z0-9_-] — reject everything else
+_VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
+
+def _require_video_id(video_id: str) -> str:
+    if not _VIDEO_ID_RE.match(video_id or ''):
+        raise HTTPException(status_code=400, detail="Invalid video id")
+    return video_id
+
+
+def _parse_range(rng: Optional[str], total: int):
+    """Shared Range-header parsing (start..end, end inclusive)."""
+    start, end = 0, total - 1
+    s = (rng or '').strip()
+    if s.startswith('bytes='):
+        spec = s[6:].split(',')[0].strip()
+        s0, _, e0 = spec.partition('-')
+        try:
+            if s0:
+                start = int(s0)
+                if e0:
+                    end = min(int(e0), total - 1)
+            elif e0:
+                start = max(0, total - int(e0))
+        except ValueError:
+            pass
+    return start, end
+
+
 class ListenIn(BaseModel):
     # Frontend track shape (MusicContext playTrack)
     id: str
@@ -670,13 +737,16 @@ async def update_profile(data: UserProfileUpdate, username: str = Depends(get_cu
         raise HTTPException(status_code=404, detail="User not found")
 
     if data.username:
-        # Check if username is already taken by someone else
         check = await db.execute(select(User).filter(User.username == data.username, User.id != user.id))
         if check.scalars().first():
             raise HTTPException(status_code=400, detail="Username already taken")
         user.username = data.username
 
     if data.email:
+        # Verify the email isn't already registered by someone else
+        echeck = await db.execute(select(User).filter(User.email == data.email, User.id != user.id))
+        if echeck.scalars().first():
+            raise HTTPException(status_code=400, detail="Email already in use")
         user.email = data.email
     if data.bio is not None:
         user.bio = data.bio[:160]  # keep short
@@ -684,7 +754,11 @@ async def update_profile(data: UserProfileUpdate, username: str = Depends(get_cu
     if data.profile_photo:
         user.profile_photo = data.profile_photo
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Username or email already taken")
     await db.refresh(user)
     return {
         "message": "Profile updated",
@@ -695,26 +769,34 @@ async def update_profile(data: UserProfileUpdate, username: str = Depends(get_cu
     }
 
 @app.post("/upload-to-catbox")
-async def upload_proxy(file: UploadFile = File(...)):
-    MAX_UPLOAD = 200 * 1024 * 1024  # Catbox's own limit; also caps memory use
-    payload = await file.read()
+async def upload_proxy(file: UploadFile = File(...), username: str = Depends(get_current_user)):
+    # Profile pictures are images only — no arbitrary executable/web-payload hosting
+    content_type = (file.content_type or '').lower()
+    filename = (file.filename or '').lower()
+    allowed_ext = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+    if not content_type.startswith('image/') or not any(filename.endswith(ext) for ext in allowed_ext):
+        raise HTTPException(status_code=415, detail="Only .jpg/.jpeg/.png/.gif/.webp images are allowed")
+    MAX_UPLOAD = 10 * 1024 * 1024  # Avatar uploads never legitimately exceed 10 MB
+    # Bounded read: at most MAX+1 bytes are buffered, even against hostile clients
+    payload = await file.read(MAX_UPLOAD + 1)
     if len(payload) > MAX_UPLOAD:
-        raise HTTPException(status_code=413, detail="File too large")
+        raise HTTPException(status_code=413, detail="File too large (max 10MB)")
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            files = {'fileToUpload': (file.filename, payload, file.content_type)}
+            safe_name = filename.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] or 'avatar.jpg'
+            files = {'fileToUpload': (safe_name, payload, content_type)}
             data = {'reqtype': 'fileupload'}
             response = await client.post('https://catbox.moe/user/api.php', data=data, files=files)
-            
             if response.status_code != 200:
                 raise HTTPException(status_code=502, detail="Catbox upload failed")
-            
-            return {"url": response.text.strip()}
+            url = response.text.strip()
+            if not url.startswith('https://'):
+                raise HTTPException(status_code=502, detail="Catbox upload failed")
+            return {"url": url}
     except HTTPException:
-        # Don't re-wrap our own deliberate status codes
         raise
     except Exception:
-        # Generic message only â€” raw httpx errors leak host/proxy internals
+        # Generic message only — raw httpx errors leak host/proxy internals
         raise HTTPException(status_code=502, detail="Catbox upload failed")
 
 @app.get("/health")
@@ -776,6 +858,7 @@ async def recommendations(title: str = Query(...), channel: str = Query(...), cu
 
 @app.get("/stream-live/{video_id}")
 async def stream_live(video_id: str, request: Request):
+    _require_video_id(video_id)
     """Relay the googlevideo audio stream to the player.
 
     We can't redirect the <audio> element to googlevideo directly: it always
@@ -827,28 +910,45 @@ async def stream_live(video_id: str, request: Request):
 @app.get("/prefetch/{video_id}")
 async def prefetch(video_id: str):
     """Warm the stream-URL cache for a track so playback starts instantly."""
+    _require_video_id(video_id)
     url = await music_engine.get_stream_url(video_id)
     return {"status": "warmed" if url else "failed", "video_id": video_id}
 
 @app.get("/stream/{video_id}")
-async def stream(video_id: str, title: str = None, request: Request = None, username: str = Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
-    # Record listen history ONLY when the stream is actually served, so
+async def stream(video_id: str, title: Optional[str] = None, request: Optional[Request] = None, username: str = Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    _require_video_id(video_id)
+    # History is recorded ONLY when the stream is actually servable, so
     # failed streams and browser re-requests don't inflate play counts.
     # Dedupe: multiple GETs for one playback within 60s count once.
+    file_path = os.path.join(music_engine.download_folder, f"{video_id}.mp3")
+    cached = os.path.exists(file_path)
+    if cached:
+        ctype = "audio/webm"
+        total = None
+    else:
+        # Probe remote audio only if not cached; 404 before counting anything
+        total, ctype = await music_engine.probe_media(video_id)
+        if not total:
+            raise HTTPException(status_code=404, detail="Audio not found")
+
     if username:
         result = await db.execute(select(User).filter(User.username == username))
         user = result.scalars().first()
-        
+
         # Find or create song in DB
         song_result = await db.execute(select(Song).filter(Song.video_id == video_id))
         song = song_result.scalars().first()
-        
+
         if not song and title:
             song = Song(video_id=video_id, title=title)
             db.add(song)
-            await db.commit()
-            await db.refresh(song)
-        
+            try:
+                await db.commit()
+                await db.refresh(song)
+            except IntegrityError:
+                await db.rollback()
+                song = (await db.execute(select(Song).filter(Song.video_id == video_id))).scalars().first()
+
         if song and user:
             recent_cutoff = datetime.utcnow() - timedelta(seconds=60)
             dup = await db.execute(
@@ -859,18 +959,14 @@ async def stream(video_id: str, title: str = None, request: Request = None, user
             )
             if dup.scalars().first() is None:
                 history = ListenHistory(user_id=user.id, song_id=song.id)
-                song.play_count += 1
+                song.play_count = (song.play_count or 0) + 1
                 db.add(history)
                 await db.commit()
 
-    # Local cached file first (instant, no network)...
-    file_path = os.path.join(music_engine.download_folder, f"{video_id}.mp3")
-    if os.path.exists(file_path):
-        media_type = "audio/mpeg"
-        if file_path.endswith(".m4a"):
-            media_type = "audio/mp4"
-        elif file_path.endswith(".webm"):
-            media_type = "audio/webm"
+    if cached:
+        content_type_map = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".webm": "audio/webm"}
+        ext = os.path.splitext(file_path)[1].lower()
+        media_type = content_type_map.get(ext, "audio/mpeg")
         return FileResponse(file_path, media_type=media_type,
                             headers={"Accept-Ranges": "bytes"})
 
@@ -881,19 +977,8 @@ async def stream(video_id: str, title: str = None, request: Request = None, user
         raise HTTPException(status_code=404, detail="Audio not found")
 
     start, end = 0, total - 1
-    rng = (request.headers.get("range") or "").strip() if request else ""
-    if rng.startswith("bytes="):
-        spec = rng[6:].split(",")[0].strip()
-        s, _, e = spec.partition("-")
-        try:
-            if s:
-                start = int(s)
-                if e:
-                    end = min(int(e), total - 1)
-            elif e:
-                start = max(0, total - int(e))
-        except ValueError:
-            pass
+    rng = request.headers.get("range") if request else None
+    start, end = _parse_range(rng, total)
     if start >= total or start > end:
         return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
 
@@ -913,6 +998,7 @@ async def stream(video_id: str, title: str = None, request: Request = None, user
 
 @app.get("/stream-video/{video_id}")
 async def stream_video(video_id: str, request: Request):
+    _require_video_id(video_id)
     """Relay the googlevideo â‰¤720p video stream for the muted <video> visual.
 
     The <video> element is hard-synced and MUTED in the app â€” the audio path
@@ -925,19 +1011,8 @@ async def stream_video(video_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Video stream not found")
 
     start, end = 0, total - 1
-    rng = (request.headers.get("range") or "").strip()
-    if rng.startswith("bytes="):
-        spec = rng[6:].split(",")[0].strip()
-        s, _, e = spec.partition("-")
-        try:
-            if s:
-                start = int(s)
-                if e:
-                    end = min(int(e), total - 1)
-            elif e:
-                start = max(0, total - int(e))
-        except ValueError:
-            pass
+    rng = request.headers.get("range")
+    start, end = _parse_range(rng, total)
     if start >= total or start > end:
         return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
 
@@ -959,6 +1034,7 @@ async def stream_video(video_id: str, request: Request):
 
 @app.post("/like")
 async def toggle_like(req: LikeRequest, username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    _require_video_id(req.video_id)
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
     if not user:
@@ -968,17 +1044,28 @@ async def toggle_like(req: LikeRequest, username: str = Depends(get_current_user
     song_result = await db.execute(select(Song).filter(Song.video_id == req.video_id))
     song = song_result.scalars().first()
     if not song:
-        song = Song(video_id=req.video_id, title=req.title, thumbnail=req.thumbnail)
+        song = Song(
+            video_id=req.video_id,
+            title=req.title,
+            artist=req.channel or 'Unknown',
+            duration=_parse_duration(req.duration),
+            thumbnail=req.thumbnail,
+        )
         db.add(song)
-        await db.commit()
-        await db.refresh(song)
-    
+        try:
+            await db.commit()
+            await db.refresh(song)
+        except IntegrityError:
+            # Lost a concurrent-create race on video_id — just re-read
+            await db.rollback()
+            song = (await db.execute(select(Song).filter(Song.video_id == req.video_id))).scalars().first()
+
     # Check if already liked
     like_result = await db.execute(
         select(LikedSong).filter(LikedSong.user_id == user.id, LikedSong.song_id == song.id)
     )
     existing = like_result.scalars().first()
-    
+
     if existing:
         await db.delete(existing)
         await db.commit()
@@ -986,7 +1073,11 @@ async def toggle_like(req: LikeRequest, username: str = Depends(get_current_user
     else:
         new_like = LikedSong(user_id=user.id, song_id=song.id)
         db.add(new_like)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Double-tap / concurrent retry — idempotent like
+            await db.rollback()
         return {"liked": True, "video_id": req.video_id}
 
 @app.get("/liked-songs")
@@ -1010,7 +1101,7 @@ async def get_liked_songs(username: str = Depends(get_current_user), db: AsyncSe
             "title": song.title,
             "channel": song.artist or "Unknown",
             "thumbnail": song.thumbnail or "",
-            "duration": str(song.duration) if song.duration else "0:00",
+            "duration": _fmt_duration(song.duration) if song.duration else "0:00",
             "video_id": song.video_id
         })
     return {"songs": songs}
@@ -1164,6 +1255,57 @@ async def featured_playlists():
 
 # --- ROOMS (JAM) SYSTEM ---
 
+_RELAY_TYPES = {'SYNC_PLAY', 'SYNC_PAUSE', 'SYNC_SEEK', 'SYNC_SETTINGS'}
+_TRACK_FIELDS = ('id', 'title', 'channel', 'thumbnail', 'duration')
+_SETTINGS_BOOL_FIELDS = ('allow_skips', 'allow_add_to_queue', 'private_room', 'only_host_controls')
+
+def _validated_relay(data):
+    """Per-type, minimal-surface validation of outbound room messages.
+
+    Only the four documented control messages are ever relayed, and each
+    is reconstructed field-by-field so unrelated keys never leave the
+    process. Anything else is dropped (a malicious client can't inject
+    arbitrary payloads or poll fields at the room).
+    """
+    if not isinstance(data, dict):
+        return None
+    mtype = data.get('type')
+    if mtype not in _RELAY_TYPES:
+        return None
+    if mtype == 'SYNC_PLAY':
+        track = data.get('track')
+        progress = data.get('progress')
+        if not isinstance(track, dict):
+            return None
+        if not isinstance(progress, (int, float)):
+            return None
+        if not track.get('id'):
+            return None
+        out_track = {k: track[k][:300] if isinstance(track.get(k), str) else track[k]
+                     for k in _TRACK_FIELDS if isinstance(track.get(k), (str, int, float))}
+        return {'type': 'SYNC_PLAY', 'track': out_track, 'progress': float(progress),
+                'sentAt': data.get('sentAt')}
+    if mtype == 'SYNC_PAUSE':
+        return {'type': 'SYNC_PAUSE', 'sentAt': data.get('sentAt')}
+    if mtype == 'SYNC_SEEK':
+        progress = data.get('progress')
+        if not isinstance(progress, (int, float)):
+            return None
+        return {'type': 'SYNC_SEEK', 'progress': float(progress), 'sentAt': data.get('sentAt')}
+    if mtype == 'SYNC_SETTINGS':
+        s = data.get('settings')
+        if not isinstance(s, dict):
+            return None
+        out = {}
+        for k in _SETTINGS_BOOL_FIELDS:
+            if isinstance(s.get(k), bool):
+                out[k] = s[k]
+        mp = s.get('max_participants')
+        if isinstance(mp, int) and 1 <= mp <= 100:
+            out['max_participants'] = mp
+        return {'type': 'SYNC_SETTINGS', 'settings': out}
+    return None
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[dict]] = {}
@@ -1196,35 +1338,78 @@ manager = ConnectionManager()
 @app.post("/rooms")
 async def create_room(name: str, username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     import uuid
-    room_code = str(uuid.uuid4())[:8].upper()
-    
+    if not name or not (1 <= len(name.strip()) <= 80):
+        raise HTTPException(status_code=400, detail="Room name must be 1-80 characters")
+
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    room = Room(
-        room_code=room_code,
-        name=name,
-        host_id=user.id,
-        is_playing=False,
-        progress=0.0
-    )
-    db.add(room)
-    await db.commit()
-    await db.refresh(room)
-    return room
+
+    # Retry up to 10 times on the (vanishingly rare) code collision
+    for _ in range(10):
+        room_code = uuid.uuid4().hex[:10].upper()
+        room = Room(room_code=room_code, name=name.strip(), host_id=user.id,
+                    is_playing=False, progress=0.0)
+        db.add(room)
+        try:
+            await db.commit()
+            await db.refresh(room)
+            return room
+        except IntegrityError:
+            await db.rollback()
+    raise HTTPException(status_code=503, detail="Could not allocate a room code — please retry")
 
 @app.get("/rooms/{room_code}")
-async def get_room(room_code: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Room).filter(Room.room_code == room_code))
+async def get_room(room_code: str, username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Room).filter(Room.room_code == room_code.upper()))
     room = result.scalars().first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     return room
 
 @app.websocket("/ws/room/{room_code}")
-async def room_websocket(websocket: WebSocket, room_code: str, username: str = "Anonymous"):
+async def room_websocket(websocket: WebSocket, room_code: str, token: str = Query(...)):
+    # Auth: every socket must carry the user's JWT. Any client-supplied name
+    # is ignored — identity comes from the token + DB.
+    from database import async_session
+
+    room_code = room_code.upper()
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        await websocket.close(code=1008)  # policy violation
+        return
+    uid = payload.get("uid")
+    try:
+        uid_int = int(uid) if uid is not None else None
+    except (TypeError, ValueError):
+        uid_int = None
+    sub = payload.get("sub")
+
+    async with async_session() as session:
+        if uid_int is not None:
+            user = await session.get(User, uid_int)
+        else:
+            user = (await session.execute(select(User).filter(User.username == sub))).scalars().first()
+        room = (await session.execute(select(Room).filter(Room.room_code == room_code))).scalars().first()
+
+    if user is None:
+        await websocket.close(code=1008)
+        return
+    if room is None:
+        await websocket.close(code=1000)
+        return
+
+    username = user.username
+
+    # Persist membership so rooms are auditable and recoverable
+    async with async_session() as session:
+        await session.execute(delete(RoomParticipant).where(
+            RoomParticipant.room_id == room.id, RoomParticipant.user_id == user.id))
+        session.add(RoomParticipant(room_id=room.id, user_id=user.id))
+        await session.commit()
+
     participants = await manager.connect(room_code, websocket, username)
     # Send initial list to the new joiner
     await websocket.send_json({"type": "PARTICIPANT_LIST", "participants": participants})
@@ -1233,24 +1418,29 @@ async def room_websocket(websocket: WebSocket, room_code: str, username: str = "
     try:
         while True:
             data = await websocket.receive_json()
-            # Only relay well-formed control messages with a known type â€”
-            # arbitrary client JSON must not be echoed to every participant
-            if not isinstance(data, dict) or not isinstance(data.get("type"), str):
-                continue
-            await manager.broadcast(room_code, data)
+            out = _validated_relay(data)
+            if out is not None:
+                await manager.broadcast(room_code, out)
     except (WebSocketDisconnect, RuntimeError, ValueError, KeyError):
-        # Malformed JSON, peer already closed, or normal disconnect â€” all
+        # Malformed JSON, peer already closed, or normal disconnect — all
         # funnel through the same guaranteed cleanup below
         pass
     finally:
         manager.disconnect(room_code, websocket)
+        async with async_session() as session:
+            room_q = (await session.execute(select(Room).filter(Room.room_code == room_code))).scalars().first()
+            if room_q is not None:
+                await session.execute(delete(RoomParticipant).where(
+                    RoomParticipant.room_id == room_q.id, RoomParticipant.user_id == user.id))
+                await session.commit()
         await manager.broadcast(room_code, {"type": "USER_LEAVE", "username": username})
+
 
 # --- ANALYTICS ---
 
 @app.get("/analytics/top-songs")
-async def top_songs(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Song).order_by(Song.play_count.desc()).limit(10))
+async def top_songs(username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Song).order_by(Song.play_count.desc().nulls_last()).limit(10))
     return result.scalars().all()
 
 

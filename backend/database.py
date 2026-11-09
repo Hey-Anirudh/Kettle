@@ -37,7 +37,7 @@ else:
     elif DATABASE_URL.startswith("postgresql://"):
         DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL[len("postgresql://"):]
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 async_session = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )
@@ -46,7 +46,7 @@ async def init_db():
     async with engine.begin() as conn:
         # Create any brand-new tables
         await conn.run_sync(Base.metadata.create_all)
-        # Idempotent migrations for columns added later — silent skips if
+        # Idempotent migrations for columns/indexes added later — silent skips if
         # they already exist (SQLite / Postgres both error on duplicates).
         for stmt in [
             "ALTER TABLE users ADD COLUMN friend_code VARCHAR",
@@ -55,23 +55,36 @@ async def init_db():
         ]:
             try:
                 await conn.exec_driver_sql(stmt)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[migration] skipped: {stmt} ({type(e).__name__})")
         # Backfill last_seen for rows that predate the migration
         try:
             await conn.exec_driver_sql(
                 "UPDATE users SET last_seen = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE last_seen IS NULL"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[migration] last_seen backfill skipped: {e}")
         # Older SQLite schemas need the index added separately (SQLite does
         # not allow UNIQUE on ALTER ADD COLUMN). IF NOT EXISTS keeps it safe.
         try:
             await conn.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_friend_code ON users(friend_code)"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[migration] friend_code index skipped: {e}")
+        # liked_songs uniqueness: dedupe any historical duplicates, then one row per (user, song)
+        try:
+            await conn.exec_driver_sql(
+                "DELETE FROM liked_songs WHERE id NOT IN (SELECT MIN(id) FROM liked_songs GROUP BY user_id, song_id)"
+            )
+        except Exception as e:
+            print(f"[migration] liked_songs dedupe skipped: {e}")
+        try:
+            await conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_liked_user_song ON liked_songs(user_id, song_id)"
+            )
+        except Exception as e:
+            print(f"[migration] liked_songs index skipped: {e}")
 
 async def get_db():
     async with async_session() as session:

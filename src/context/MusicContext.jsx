@@ -37,8 +37,10 @@ export const MusicProvider = ({ children }) => {
   const currentTrackRef = useRef(currentTrack);
   const repeatRef = useRef(repeat);
   const shuffleRef = useRef(shuffle);
+  const progressRef = useRef(progress);
   const recentIdsRef = useRef(new Set()); // Track recently played to avoid loops
   const restoredTrackRef = useRef(false); // Restore runs once per session, not per user-object change
+  const restoredSessionRef = useRef(null); // Restore profile state once per real session
   const upNextRef = useRef(null); // { forId, pick, pool } precomputed next track
 
   // Keep refs in sync
@@ -46,6 +48,7 @@ export const MusicProvider = ({ children }) => {
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
   useEffect(() => { repeatRef.current = repeat; }, [repeat]);
   useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
+  useEffect(() => { progressRef.current = progress; }, [progress]);
 
   // "Continue Listening" is DB-backed: /users/listen-history is the only
   // source of truth. No localStorage copy — the backend is the record.
@@ -115,43 +118,43 @@ export const MusicProvider = ({ children }) => {
     };
   }, []);
 
-  // PERSISTENCE: Restore state on login
+  // Restore profile state (volume/shuffle/repeat/queue) exactly once per
+  // session — NEVER re-apply user-object refreshes (profile saves, friend
+  // refreshes) over top of the user's live choices.
   useEffect(() => {
-    if (user && user.playback_state) {
-      const state = user.playback_state;
-      if (state.volume !== undefined) {
-        setVolumeState(state.volume);
-        audioRef.current.volume = state.volume;
-      }
-      if (state.shuffle !== undefined) setShuffle(state.shuffle);
-      if (state.repeat !== undefined) setRepeat(state.repeat);
-      
-      if (user.current_queue && user.current_queue.length > 0) {
-        setQueue(user.current_queue);
-      }
-      
-      // Restore track if possible (once per token — a user-object identity
-      // change like a profile save must not reload the old track)
-      if (state.track_id && !currentTrack && !restoredTrackRef.current) {
-        restoredTrackRef.current = true;
-        // We'd need to fetch the track details or have them in the state
-        // For now, let's assume the queue contains it
-        const track = user.current_queue?.find(t => t.id === state.track_id);
-        if (track) {
-          setCurrentTrack(track);
-          // Set progress but don't auto-play to avoid browser blocks
-          const audio = audioRef.current;
-          const resumeAt = state.progress || 0;
-          audio.src = `${LOCAL_API}/stream/${track.id}?title=${encodeURIComponent(track.title || '')}`;
-          setProgress(resumeAt);
-          // Seeking before metadata is loaded is dropped by the browser —
-          // wait for loadedmetadata, but only once
-          const seekWhenReady = () => {
-            try { audio.currentTime = resumeAt; } catch { /* stream rejected seek */ }
-            audio.removeEventListener('loadedmetadata', seekWhenReady);
-          };
-          audio.addEventListener('loadedmetadata', seekWhenReady);
-        }
+    if (!user) return;
+    if (restoredSessionRef.current === user.username) return;
+    if (!(user.playback_state || user.current_queue)) return;
+    restoredSessionRef.current = user.username;
+
+    const state = user.playback_state || {};
+    if (state.volume !== undefined) {
+      setVolumeState(state.volume);
+      audioRef.current.volume = state.volume;
+    }
+    if (state.shuffle !== undefined) setShuffle(state.shuffle);
+    if (state.repeat !== undefined) setRepeat(state.repeat);
+
+    if (user.current_queue && user.current_queue.length > 0) {
+      setQueue(user.current_queue);
+    }
+
+    // Restore track if possible (once per token)
+    if (state.track_id && !currentTrack && !restoredTrackRef.current) {
+      restoredTrackRef.current = true;
+      const track = user.current_queue?.find(t => t.id === state.track_id);
+      if (track) {
+        setCurrentTrack(track);
+        // Set progress but don't auto-play to avoid browser blocks
+        const audio = audioRef.current;
+        const resumeAt = state.progress || 0;
+        audio.src = `${LOCAL_API}/stream/${track.id}?title=${encodeURIComponent(track.title || '')}`;
+        setProgress(resumeAt);
+        const seekWhenReady = () => {
+          try { audio.currentTime = resumeAt; } catch { /* stream rejected seek */ }
+          audio.removeEventListener('loadedmetadata', seekWhenReady);
+        };
+        audio.addEventListener('loadedmetadata', seekWhenReady);
       }
     }
   }, [user]);
@@ -271,7 +274,14 @@ export const MusicProvider = ({ children }) => {
     };
 
     audio.src = streamUrl;
-    if (startTime > 0) audio.currentTime = startTime;
+    if (startTime > 0) {
+      // Seek before loadedmetadata is dropped by the browser — wait first.
+      const seekOnce = () => {
+        try { audio.currentTime = startTime; } catch { /* pre-metadata */ }
+        audio.removeEventListener('loadedmetadata', seekOnce);
+      };
+      audio.addEventListener('loadedmetadata', seekOnce);
+    }
 
     try {
       await audio.play();
@@ -341,7 +351,7 @@ export const MusicProvider = ({ children }) => {
       const pool = fresh.length > 0 ? fresh : pre.pool;
       const stillFresh = pool.some(t => t.id === pre.pick?.id);
       const pick = stillFresh ? pre.pick : pool[Math.floor(Math.random() * Math.min(5, pool.length))];
-      playTrack(pick, pool);
+      playTrack(pick, q.length > 0 ? null : pool);
       return;
     }
 
@@ -356,9 +366,10 @@ export const MusicProvider = ({ children }) => {
         const freshResults = data.results.filter(t => !recentIdsRef.current.has(t.id));
         const finalPool = freshResults.length > 0 ? freshResults : data.results;
 
-        // Pick one for variety
+        // Pick one for variety — only adopt the rec pool as the queue when
+        // the user has nothing queued, never silently replace their queue
         const pick = finalPool[Math.floor(Math.random() * Math.min(5, finalPool.length))];
-        playTrack(pick, finalPool);
+        playTrack(pick, q.length > 0 ? null : finalPool);
         return;
       }
       // No recommendations returned: advance the queue if there is one
@@ -452,8 +463,9 @@ export const MusicProvider = ({ children }) => {
       setIsRoomHost(isHost);
     } catch (e) { console.error("Failed to fetch room info", e); }
 
-    const username = user?.username || "Guest";
-    const ws = new WebSocket(`${WS_BASE}/ws/room/${roomCode}?username=${encodeURIComponent(username)}`);
+    const token = localStorage.getItem('token');
+    if (!token) return; // Jam needs a session — the Join button guards this too
+    const ws = new WebSocket(`${WS_BASE}/ws/room/${roomCode}?token=${encodeURIComponent(token)}`);
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
@@ -465,11 +477,12 @@ export const MusicProvider = ({ children }) => {
           break;
         case 'USER_JOIN':
           setRoomParticipants(prev => [...new Set([...prev, msg.username])]);
-          // If I am host, send my current state to the new joiner
-          if (isHost && currentTrackRef.current) {
-            broadcastRoomState('SYNC_PLAY', { 
-              track: currentTrackRef.current, 
-              progress: audioRef.current.currentTime 
+          // If I am host AND the room is actually playing, hand the new joiner the state
+          if (isHost && currentTrackRef.current && !audioRef.current.paused) {
+            broadcastRoomState('SYNC_PLAY', {
+              track: currentTrackRef.current,
+              progress: audioRef.current.currentTime,
+              sentAt: Date.now(),
             });
           }
           break;
@@ -493,8 +506,12 @@ export const MusicProvider = ({ children }) => {
           } else if (drift > 2) {
             audioRef.current.currentTime = targetTime;
           }
-          
-          if (audioRef.current.paused) audioRef.current.play().catch(() => {});
+
+          // Only auto-play when the room is clearly live or this is a new track —
+          // never resume a locally paused player for the same song.
+          if (isDifferentTrack || !audioRef.current.paused) {
+            if (audioRef.current.paused) audioRef.current.play().catch(() => {});
+          }
           setTimeout(() => { isSyncingRef.current = false; }, 200);
           break;
         case 'SYNC_PAUSE':
@@ -606,8 +623,10 @@ export const MusicProvider = ({ children }) => {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Don't trigger shortcuts when typing in inputs
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      const t = e.target;
+      if (t instanceof HTMLElement) {
+        if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'BUTTON' || t.tagName === 'A' || t.tagName === 'SELECT' || t.closest('[role="button"]')) return;
+      }
       
       switch(e.code) {
         case 'Space':
@@ -616,11 +635,11 @@ export const MusicProvider = ({ children }) => {
           break;
         case 'ArrowRight':
           if (e.shiftKey) handleNextTrack();
-          else seek(Math.min(progress + 5, duration));
+          else seek(Math.min(progressRef.current + 5, duration > 0 ? duration : progressRef.current + 5));
           break;
         case 'ArrowLeft':
           if (e.shiftKey) prevTrack();
-          else seek(Math.max(progress - 5, 0));
+          else seek(Math.max(progressRef.current - 5, 0));
           break;
         case 'ArrowUp':
           e.preventDefault();
@@ -644,7 +663,7 @@ export const MusicProvider = ({ children }) => {
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, handleNextTrack, prevTrack, seek, setVolume, progress, duration, volume]);
+  }, [togglePlay, handleNextTrack, prevTrack, seek, setVolume, duration, volume]);
 
   // MediaSession API for system media controls
   useEffect(() => {
@@ -667,6 +686,9 @@ export const MusicProvider = ({ children }) => {
       });
       navigator.mediaSession.setActionHandler('pause', () => {
         audioRef.current?.pause();
+        if (!isSyncingRef.current && currentTrackRef.current) {
+          broadcastRoomState('SYNC_PAUSE', { sentAt: Date.now() });
+        }
       });
       navigator.mediaSession.setActionHandler('nexttrack', handleNextTrack);
       navigator.mediaSession.setActionHandler('previoustrack', prevTrack);

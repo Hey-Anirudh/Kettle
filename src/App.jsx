@@ -226,8 +226,9 @@ function buildTasteShelves({ listenHistory, searchHistory, likedSongsList }) {
   return shelves.slice(0, 3);
 }
 
-// Time-of-day vibe for the hero (recomputed each render — trivial cost)
-const VIBE = (() => {
+// Time-of-day vibe for the hero — computed per render (cheap) so it
+// never shows yesterday's morning vibe after midnight
+const vibeForNow = () => {
   const h = new Date().getHours();
   if (h >= 6 && h < 12) return {
     key: 'morning', greeting: 'Good Morning', mood: 'Focus & Coffee',
@@ -261,7 +262,7 @@ const VIBE = (() => {
     blob1: '#537895', blob2: '#3d1e6d', dark: true,
     playQuery: 'late night drive synthwave mix'
   };
-})();
+};
 
 // One-tap mood chips: each plays a real search-backed mix.
 // Icons are lucide SVG components (no emojis anywhere in the app).
@@ -300,6 +301,9 @@ function App() {
     roomSettings, updateRoomSettings,
     audioRef
   } = useMusic();
+
+  // Time-of-day vibe — recomputed per render, never stale
+  const VIBE = vibeForNow();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [results, setResults] = useState([]);
@@ -349,6 +353,7 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState(null); // 'available', 'downloaded'
   const [showVideo, setShowVideo] = useState(false);
   const videoRef = useRef(null);
+  const dragEndedAtRef = useRef(0);
   const [fpCopied, setFpCopied] = useState(false);
   const [fpIdle, setFpIdle] = useState(false);
   
@@ -363,28 +368,28 @@ function App() {
   const [newFriendCodeDraft, setNewFriendCodeDraft] = useState('');
   const [copiedFriendCode, setCopiedFriendCode] = useState(false);
 
-  // Deterministic color + initials per username — avoids external HTTP
-  // dependency (i.pravatar.cc) for avatars
-  const InitialsAvatar = ({ username, photo, size = 32, online }) => (
-    photo
-      ? <img src={photo} style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover' }} alt="" />
-      : <div style={{
-          width: size, height: size, borderRadius: '50%',
-          background: avatarColor(username),
-          color: '#fff', fontSize: Math.max(11, Math.floor(size * 0.4)),
-          fontWeight: 800, display: 'flex', alignItems: 'center',
-          justifyContent: 'center', letterSpacing: '0.5px'
-        }}>{(username || '?')[0].toUpperCase()}</div>
-  );
+// Deterministic color + initials per username — avoids external HTTP
+// dependency (i.pravatar.cc) for avatars
+const avatarColor = (name) => {
+  let h = 2166136261 >>> 0;
+  const s = String(name || '??');
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 16777619) >>> 0; }
+  const hues = [0, 25, 50, 100, 150, 200, 250, 290, 330];
+  const pick = hues[h % hues.length];
+  return `linear-gradient(135deg, hsl(${pick} 70% 40%), hsl(${(pick + 30) % 360} 80% 30%))`;
+};
 
-  const avatarColor = (name) => {
-    let h = 2166136261 >>> 0;
-    const s = String(name || '??');
-    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 16777619) >>> 0; }
-    const hues = [0, 25, 50, 100, 150, 200, 250, 290, 330];
-    const pick = hues[h % hues.length];
-    return `linear-gradient(135deg, hsl(${pick} 70% 40%), hsl(${(pick + 30) % 360} 80% 30%))`;
-  };
+const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
+  photo
+    ? <img src={photo} style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover' }} alt="" />
+    : <div style={{
+        width: size, height: size, borderRadius: '50%',
+        background: avatarColor(username),
+        color: '#fff', fontSize: Math.max(11, Math.floor(size * 0.4)),
+        fontWeight: 800, display: 'flex', alignItems: 'center',
+        justifyContent: 'center', letterSpacing: '0.5px'
+      }}>{(username || '?')[0].toUpperCase()}</div>
+));
 
   const relativeTime = (iso) => {
     const d = iso ? new Date(iso) : null;
@@ -431,8 +436,8 @@ function App() {
     if (!newFriendCodeDraft) return;
     const token = localStorage.getItem('token');
     if (!token) return;
-    const payload = newFriendCodeDraft.startsWith('KT-')
-      ? { friend_code: newFriendCodeDraft }
+    const payload = /^kt/i.test(newFriendCodeDraft)
+      ? { friend_code: newFriendCodeDraft.toUpperCase() }
       : { username: newFriendCodeDraft.toLowerCase() };
     try {
       const res = await axios.post(`${API_BASE}/friends/request`, payload, { headers: { Authorization: `Bearer ${token}` } });
@@ -612,6 +617,10 @@ function App() {
       ['token', 'kettle_guest', 'kettle_name', 'kettle_auth_mode', 'kettle_recent', 'kettle_friends']
         .forEach(k => localStorage.removeItem(k));
     } catch {}
+    // Stop audio, drop the Jam room, wipe friend data from the screen —
+    // a signed-out session must look completely clean.
+    try { audioRef.current?.pause(); } catch {}
+    leaveRoom();
     // Wipe every session-scoped taste cache so a different account on this
     // device never inherits the previous one's shelves
     setUser(null);
@@ -622,6 +631,10 @@ function App() {
     setRecentTracks([]);
     setQueue([]);
     setLikedSongs(new Set());
+    setFriends([]);
+    setFriendRequests([]);
+    setSuggestedFriends([]);
+    setOwnFriendCode('');
     setHomeResults([]);
     setShowNamePrompt(true);
   };
@@ -920,15 +933,16 @@ function App() {
   const handleFileSelect = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    const token = localStorage.getItem('token');
 
     setIsUploading(true);
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      // Use local backend proxy to avoid CORS issues
+      // Local backend proxy, authenticated like every other account call
       const res = await axios.post(`${API_BASE}/upload-to-catbox`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+        headers: { 'Content-Type': 'multipart/form-data', Authorization: `Bearer ${token}` }
       });
       const photoUrl = res.data.url;
       await handleSaveProfile(photoUrl);
@@ -988,8 +1002,18 @@ function App() {
       const res = await axios.get(`${API_BASE}/liked-songs`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      setLikedSongsList(res.data.songs);
-      setLikedSongs(new Set(res.data.songs.map(s => s.id)));
+      const songs = res.data.songs || [];
+      // Only update state when content actually changed — identity churn
+      // retriggers the taste-shelf builder for no reason every library open
+      setLikedSongsList(prev => {
+        if (prev.length === songs.length && prev.every((s, i) => s.id === songs[i].id)) return prev;
+        return songs;
+      });
+      setLikedSongs(prev => {
+        const next = new Set(songs.map(s => s.id));
+        if (prev.size === next.size && [...next].every(k => prev.has(k))) return prev;
+        return next;
+      });
     } catch (err) { console.error(err); }
   }, [setLikedSongs]);
 
@@ -1052,7 +1076,8 @@ function App() {
   };
 
   const handleProgressClick = (e) => {
-    if (isDragging) return;
+    // Skip the redundant seek immediately after a drag-end (already applied on mouseup)
+    if (isDragging || (dragEndedAtRef.current && Date.now() - dragEndedAtRef.current < 250)) return;
     const bar = progressBarRef.current;
     if (!bar) return;
     const rect = bar.getBoundingClientRect();
@@ -1078,6 +1103,7 @@ function App() {
       const handleMouseMove = (e) => updateDrag(e);
       const handleMouseUp = (e) => {
         updateDrag(e);
+        dragEndedAtRef.current = Date.now();
         setIsDragging(false);
         // Extracting p from updateDrag logic for final seek
         const bar = progressBarRef.current;
@@ -1215,12 +1241,14 @@ function App() {
               <div className="jam-join-box">
                 <input
                   type="text"
-                  placeholder="Enter code..."
+                  placeholder={user ? "Enter code..." : "Loading account..."}
                   value={joinCode}
                   onChange={e => setJoinCode(e.target.value.toUpperCase())}
-                  onKeyDown={e => e.key === 'Enter' && joinCode && joinRoom(joinCode)}
+                  onKeyDown={e => e.key === 'Enter' && user && joinCode && joinRoom(joinCode)}
+                  disabled={!user}
+                  maxLength={10}
                 />
-                <button className="join-btn-mini" onClick={() => joinCode && joinRoom(joinCode)}>Join</button>
+                <button className="join-btn-mini" disabled={!user || !joinCode} onClick={() => user && joinCode && joinRoom(joinCode)}>Join</button>
               </div>
             )}
           </div>
@@ -1246,7 +1274,16 @@ function App() {
                   type="text"
                   placeholder="KT-XXXXXX or username"
                   value={newFriendCodeDraft}
-                  onChange={e => setNewFriendCodeDraft(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 10))}
+                  onChange={e => {
+                    const val = e.target.value;
+                    // Friend-code mode: anything starting (case-insensitively) with "kt"
+                    // keeps code charset; everything else is a username lookup
+                    if (/^kt/i.test(val)) {
+                      setNewFriendCodeDraft(val.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 10));
+                    } else {
+                      setNewFriendCodeDraft(val.toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 32));
+                    }
+                  }}
                   autoFocus
                 />
                 <button type="submit" className="join-btn-mini" disabled={!newFriendCodeDraft}>Send</button>
@@ -1630,17 +1667,16 @@ function App() {
                       <div className="jam-panel-section">
                         <h3>Participants ({roomParticipants.length})</h3>
                         <div className="participant-list">
-                          {(roomParticipants || []).map((p, i) => (
-                            <div key={i} className="participant-item">
+                          {(roomParticipants || []).map((p) => (
+                            <div key={p} className="participant-item">
                               <div className="p-avatar">
-                                {p ? p.charAt(0).toUpperCase() : '?'}
+                                {p ? String(p).charAt(0).toUpperCase() : '?'}
                                 {p === (user?.username || "Guest") && <div className="me-badge" />}
                               </div>
                               <div className="p-info">
                                 <p>{p || "Unknown"}</p>
-                                <span>{i === 0 ? 'Room Host' : 'Listening'}</span>
+                                <span>{p === (user?.username || "Guest") ? (isRoomHost ? 'Room Host' : 'Listening') : 'Listening'}</span>
                               </div>
-                              {i === 0 && <Disc3 size={16} className="logo-icon" />}
                             </div>
                           ))}
                         </div>
@@ -2148,7 +2184,7 @@ function App() {
             <p className="queue-label">Next Up</p>
             <div className="queue-list">
               {queue.filter(t => t.id !== currentTrack?.id).slice(0, 20).map((track, i) => (
-                <div key={track.id} className="queue-item" onClick={() => playTrack(track, queue)}>
+                <div key={`${track?.id || 'q'}-${i}`} className="queue-item" onClick={() => playTrack(track, queue)}>
                   <img src={track.thumbnail} alt="" />
                   <div>
                     <p className="q-title">{track.title}</p>

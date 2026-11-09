@@ -24,8 +24,8 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Onboarding preferences (JSON list of strings)
-    preferred_genres = Column(JSON, default=[])
-    preferred_artists = Column(JSON, default=[])
+    preferred_genres = Column(JSON, default=list)
+    preferred_artists = Column(JSON, default=list)
     onboarding_completed = Column(Boolean, default=False)
     profile_photo = Column(String, nullable=True)
 
@@ -35,8 +35,8 @@ class User(Base):
     last_seen = Column(DateTime, nullable=True)
 
     # NEW: Persistence for "every single thing"
-    current_queue = Column(JSON, default=[]) # List of song objects
-    playback_state = Column(JSON, default={
+    current_queue = Column(JSON, default=list) # List of song objects
+    playback_state = Column(JSON, default=lambda: {
         "track_id": None,
         "progress": 0,
         "volume": 0.5,
@@ -102,6 +102,8 @@ class LikedSong(Base):
     song_id = Column(Integer, ForeignKey("songs.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    __table_args__ = (UniqueConstraint("user_id", "song_id", name="uq_liked_user_song"),)
+
     user = relationship("User", back_populates="liked_songs")
 
 class ListenHistory(Base):
@@ -123,7 +125,7 @@ class Room(Base):
 
     # Massive Settings (Stored as JSON for flexibility)
     # Includes: allow_skips, allow_add_to_queue, private_room, max_participants
-    settings = Column(JSON, default={
+    settings = Column(JSON, default=lambda: {
         "allow_skips": True,
         "allow_add_to_queue": True,
         "private_room": False,
