@@ -1270,8 +1270,8 @@ function App() {
 
         <div className="library-section">
           <div className="library-header">
-            <span><Users size={22} /> Jam Session</span>
-            {!currentRoom && <PlusSquare size={20} className="ctrl-icon" onClick={() => setIsCreatingRoom(true)} />}
+            <span><Users size={17} /> Jam Session</span>
+            {!currentRoom && <button className="header-action" onClick={() => setIsCreatingRoom(true)} aria-label="Create jam room"><PlusSquare size={17} /></button>}
           </div>
           <div className="jam-section-body">
             {currentRoom ? (
@@ -1300,10 +1300,10 @@ function App() {
           </div>
         </div>
 
-        <div className="library-section friends-section" style={{ marginTop: '24px' }}>
+        <div className="library-section friends-section">
           <div className="library-header">
-            <span><User size={22} /> Friends{friends.length > 0 && <span className="friends-count">{friends.length}</span>}</span>
-            <UserPlus size={20} className="ctrl-icon" onClick={() => setIsAddingFriend(!isAddingFriend)} aria-label="Add a friend" />
+            <span><User size={17} /> Friends{friends.length > 0 && <span className="friends-count">{friends.length}</span>}</span>
+            <button className="header-action" onClick={() => setIsAddingFriend(!isAddingFriend)} aria-label="Add a friend"><UserPlus size={17} /></button>
           </div>
           <div className="jam-section-body friends-body">
             {ownFriendCode && (
@@ -1368,9 +1368,9 @@ function App() {
                 </div>
               )}
               {friends.length === 0 && friendRequests.length === 0 && ownFriendCode && (
-                <span style={{ fontSize: '12px', color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                <div className="friends-empty">
                   No friends yet. Share your code <strong style={{ color: 'var(--text)' }}>{ownFriendCode}</strong> — or paste <strong style={{ color: 'var(--text)' }}>somebody's</strong> code above to add them.
-                </span>
+                </div>
               )}
             </div>
 
@@ -1394,10 +1394,10 @@ function App() {
           </div>
         </div>
 
-        <div className="library-section" style={{ flex: 2 }}>
+        <div className="library-section section--grow">
           <div className="library-header">
-            <span><Library size={22} /> Your Library</span>
-            <PlusSquare size={20} className="ctrl-icon" onClick={() => setIsCreatingPlaylist(true)} />
+            <span><Library size={17} /> Your Library</span>
+            <button className="header-action" onClick={() => setIsCreatingPlaylist(true)} aria-label="Create playlist"><PlusSquare size={17} /></button>
           </div>
 
           <div className="library-scroll">
