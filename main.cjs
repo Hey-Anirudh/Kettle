@@ -32,7 +32,8 @@ function createWindow() {
     },
     frame: true,
     icon: path.join(__dirname, 'icon.ico'),
-    // Set a standard Chrome user agent to bypass Google's OAuth block on Electron/Webviews
+    // Set a standard Chrome user agent so embedded YouTube players load
+    // without refusing playback (Error 150/153).
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   });
 
@@ -210,11 +211,8 @@ function startBackend() {
   }
 }
 
-// IPC handler: open URL in system browser (for Google OAuth)
-ipcMain.handle('open-external', (event, url) => {
-  return shell.openExternal(url);
-});
-
+// NOTE: no open-external IPC — all window.open calls are handled by
+// setWindowOpenHandler above (external links go to the system browser).
 // Second launch focuses the first instance instead of killing its backend
 if (!app.requestSingleInstanceLock()) {
   app.quit();

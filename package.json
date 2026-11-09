@@ -73,7 +73,6 @@
     "vite": "^8.0.10"
   },
   "dependencies": {
-    "@react-oauth/google": "^0.13.5",
     "@vitejs/plugin-react-swc": "^4.3.0",
     "axios": "^1.16.0",
     "clsx": "^2.1.1",

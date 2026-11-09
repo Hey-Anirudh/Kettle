@@ -1,4 +1,4 @@
-# 🎵 Redew Music — Premium Streaming Platform
+# ðŸŽµ Redew Music â€” Premium Streaming Platform
 
 <p align="center">
   <img src="public/icon.png" width="128" height="128" alt="Redew Logo">
@@ -10,19 +10,19 @@
 
 ---
 
-## ✨ Overview
+## âœ¨ Overview
 
 **Redew** is a high-performance desktop music streaming application built for music enthusiasts who crave a minimalist yet powerful interface. Seamlessly integrating the vast library of YouTube with a premium, glassmorphic design, Redew provides an unparalleled listening experience.
 
-## 🚀 Key Features
+## ðŸš€ Key Features
 
-- 🎧 **High-Fidelity Streaming**: Integrated `hls.js` for adaptive, high-quality audio playback.
-- 🔐 **Secure Authentication**: Native Google OAuth integration for personalized playlists and sync.
-- 🎨 **Minimalist Aesthetics**: A sleek, dark-mode interface built with Tailwind CSS and Framer Motion.
-- 🔍 **Smart Search**: Lightning-fast search engine powered by a custom Python backend.
-- 📦 **Desktop Native**: Fully optimized for Windows with a native installer and system tray support.
+- ðŸŽ§ **High-Fidelity Streaming**: Integrated `hls.js` for adaptive, high-quality audio playback.
+- **Name-based accounts**: instant sign-in by name, synced to the shared cloud — library, friends and Jam sessions follow you to every device.
+- ðŸŽ¨ **Minimalist Aesthetics**: A sleek, dark-mode interface built with Tailwind CSS and Framer Motion.
+- ðŸ” **Smart Search**: Lightning-fast search engine powered by a custom Python backend.
+- ðŸ“¦ **Desktop Native**: Fully optimized for Windows with a native installer and system tray support.
 
-## 🛠️ The Tech Stack (Peak Performance)
+## ðŸ› ï¸ The Tech Stack (Peak Performance)
 
 Redew is forged using a modern, robust tech stack designed for speed, security, and beauty:
 
@@ -43,13 +43,13 @@ Redew is forged using a modern, robust tech stack designed for speed, security, 
 - **[Electron Forge](https://www.electronforge.io/)**: Professional packaging and distribution toolkit.
 - **[PyInstaller](https://pyinstaller.org/)**: Compiling the Python backend into a high-performance standalone executable.
 
-## 📥 Installation
+## ðŸ“¥ Installation
 
 1. Download the latest installer: **[Redew-1.1-Installer.exe](./Redew-1.1-Installer.exe)**.
 2. Run the installer and follow the setup wizard.
 3. Launch Redew from your desktop or start menu and start streaming!
 
-## 👩‍💻 For Developers
+## ðŸ‘©â€ðŸ’» For Developers
 
 If you want to run the project from source:
 
@@ -87,5 +87,5 @@ If you want to run the project from source:
 ---
 
 <p align="center">
-  Built with ❤️ by <b>Anirudh</b>
+  Built with â¤ï¸ by <b>Anirudh</b>
 </p>

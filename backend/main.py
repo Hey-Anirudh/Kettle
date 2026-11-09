@@ -86,25 +86,12 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
-class GoogleAuth(BaseModel):
-    token: str
-
 class LikeRequest(BaseModel):
     video_id: str
     title: str
     channel: str
     thumbnail: str
     duration: str
-
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-# Override on the shared cloud (Render) with the public callback URL.
-# Default keeps the bundled local backend flow working for development.
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/auth/google/callback")
-
-
-def google_oauth_configured() -> bool:
-    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
 async def get_optional_user(token: Optional[str] = Depends(oauth2_scheme_optional)):
     """Returns username if authenticated, None otherwise (never 401s)"""
@@ -124,7 +111,7 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).filter(User.username == user.username))
     if result.scalars().first():
         raise HTTPException(status_code=400, detail="Username already registered")
-    # Email also has a unique DB index — pre-check to return 400 instead of 500
+    # Email also has a unique DB index â€” pre-check to return 400 instead of 500
     email_result = await db.execute(select(User).filter(User.email == user.email))
     if email_result.scalars().first():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -153,7 +140,7 @@ async def login(form_data: UserCreate, db: AsyncSession = Depends(get_db)):
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Generate a unique, human-shareable friend code like "KT-AB4FCK" — 6 chars
+# Generate a unique, human-shareable friend code like "KT-AB4FCK" â€” 6 chars
 # from a no-ambiguous alphabet (no 0, O, 1, I, L). Collision-safe: retries
 # up to 10 times with progressively longer suffix if needed (uncommon).
 _FRIEND_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -186,7 +173,7 @@ def _is_online(user):
 
 
 def _user_public(user, mut: bool = False):
-    """Public-safe subset of profile fields — friends can see these."""
+    """Public-safe subset of profile fields â€” friends can see these."""
     return {
         "id": user.id,
         "username": user.username,
@@ -203,7 +190,7 @@ def _discoverable():
     """Social discovery predicate.
 
     Excludes (a) throwaway/test usernames created through the API and
-    (b) accounts that never finished onboarding (no genres picked — no
+    (b) accounts that never finished onboarding (no genres picked â€” no
     taste to overlap). Friend links, code-based adding and Jam invites are
     unaffected; only discovery lists use this.
     """
@@ -310,7 +297,7 @@ async def send_friend_request(
     if not target:
         raise HTTPException(status_code=404, detail="No user matches that code or username")
     if target.id == me.id:
-        raise HTTPException(status_code=400, detail="That's you — you can't friend yourself")
+        raise HTTPException(status_code=400, detail="That's you â€” you can't friend yourself")
 
     existing = (await db.execute(select(Friendship).where(or_(
         (Friendship.requester_id == me.id) & (Friendship.addressee_id == target.id),
@@ -572,7 +559,7 @@ class ListenIn(BaseModel):
 @app.post("/users/listen")
 async def record_listen(data: ListenIn, username: str = Depends(get_current_user),
                         db: AsyncSession = Depends(get_db)):
-    """Record a play — feeds Continue Listening and the per-user taste engine."""
+    """Record a play â€” feeds Continue Listening and the per-user taste engine."""
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
     if not user:
@@ -654,7 +641,7 @@ async def get_listen_history(limit: int = Query(30, ge=1, le=100),
 async def get_search_history(limit: int = Query(30, ge=1, le=100),
                              username: str = Depends(get_current_user),
                              db: AsyncSession = Depends(get_db)):
-    """Recent search queries — a core signal for per-user personalization."""
+    """Recent search queries â€” a core signal for per-user personalization."""
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
     if not user:
@@ -727,7 +714,7 @@ async def upload_proxy(file: UploadFile = File(...)):
         # Don't re-wrap our own deliberate status codes
         raise
     except Exception:
-        # Generic message only — raw httpx errors leak host/proxy internals
+        # Generic message only â€” raw httpx errors leak host/proxy internals
         raise HTTPException(status_code=502, detail="Catbox upload failed")
 
 @app.get("/health")
@@ -926,10 +913,10 @@ async def stream(video_id: str, title: str = None, request: Request = None, user
 
 @app.get("/stream-video/{video_id}")
 async def stream_video(video_id: str, request: Request):
-    """Relay the googlevideo ≤720p video stream for the muted <video> visual.
+    """Relay the googlevideo â‰¤720p video stream for the muted <video> visual.
 
-    The <video> element is hard-synced and MUTED in the app — the audio path
-    plays the soundtrack — so this endpoint never records listen history and
+    The <video> element is hard-synced and MUTED in the app â€” the audio path
+    plays the soundtrack â€” so this endpoint never records listen history and
     needs no user auth (mirrors how YouTube Music pairs a video feed with its
     audio feed). Same closed-range chunk relay as audio, same 206/416 handling.
     """
@@ -1246,13 +1233,13 @@ async def room_websocket(websocket: WebSocket, room_code: str, username: str = "
     try:
         while True:
             data = await websocket.receive_json()
-            # Only relay well-formed control messages with a known type —
+            # Only relay well-formed control messages with a known type â€”
             # arbitrary client JSON must not be echoed to every participant
             if not isinstance(data, dict) or not isinstance(data.get("type"), str):
                 continue
             await manager.broadcast(room_code, data)
     except (WebSocketDisconnect, RuntimeError, ValueError, KeyError):
-        # Malformed JSON, peer already closed, or normal disconnect — all
+        # Malformed JSON, peer already closed, or normal disconnect â€” all
         # funnel through the same guaranteed cleanup below
         pass
     finally:
@@ -1266,182 +1253,8 @@ async def top_songs(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Song).order_by(Song.play_count.desc()).limit(10))
     return result.scalars().all()
 
-# --- SERVER-SIDE GOOGLE OAUTH WITH PKCE (for Electron desktop app) ---
-
-import uuid as _uuid
-import hashlib
-import base64
-pending_google_auth = {}
-
-def generate_pkce():
-    verifier = base64.urlsafe_b64encode(os.urandom(32)).decode('utf-8').replace('=', '')
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode('utf-8')).digest()).decode('utf-8').replace('=', '')
-    return verifier, challenge
-
-@app.get("/auth/google/start")
-async def google_auth_start():
-    if not google_oauth_configured():
-        # Clear, actionable signal so the frontend can show a friendly
-        # fallback instead of a broken consent page
-        raise HTTPException(status_code=503, detail="google_oauth_not_configured")
-    session_id = str(_uuid.uuid4())[:12]
-    verifier, challenge = generate_pkce()
-    pending_google_auth[session_id] = {"status": "pending", "verifier": verifier}
-    
-    google_auth_url = (
-        f"https://accounts.google.com/o/oauth2/v2/auth?"
-        f"client_id={GOOGLE_CLIENT_ID}&"
-        f"redirect_uri={GOOGLE_REDIRECT_URI}&"
-        f"response_type=code&"
-        f"scope=openid%20email%20profile&"
-        f"state={session_id}&"
-        f"code_challenge={challenge}&"
-        f"code_challenge_method=S256&"
-        f"prompt=select_account"
-    )
-    return {"url": google_auth_url, "session_id": session_id}
-
-@app.get("/auth/google/callback")
-async def google_auth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
-    from fastapi.responses import HTMLResponse
-    # json.dumps escapes quotes/backslashes so attacker-controlled query params
-    # can't break out of the JS string literal (XSS)
-    import json as _json
-    if error or not code or not state:
-        msg = error or ("missing code" if not code else "missing state")
-        return HTMLResponse(content=(
-            "<!DOCTYPE html><html><head><title>Kettle - Sign In</title>"
-            "<style>body{background:#121212;color:#fff;font-family:'Segoe UI',sans-serif;"
-            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0}"
-            ".card{text-align:center;padding:40px;max-width:420px}.err{color:#e74c3c}"
-            "p{color:#b3b3b3;font-size:14px}</style></head><body>"
-            "<div class='card'><h1 class='err'>Login Failed</h1>"
-            f"<p>Google returned: {_json.dumps(str(msg))[1:-1]}</p>"
-            "<p>Close this window and tap your name in Kettle instead.</p>"
-            "</div></body></html>"
-        ), status_code=400)
-    code_js = _json.dumps(code)
-    state_js = _json.dumps(state)
-    # We have the code, now we tell the client to complete the exchange
-    html = f"""<!DOCTYPE html>
-<html><head><title>Kettle - Signing In</title>
-<style>
-body{{background:#121212;color:#fff;font-family:'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}
-.card{{text-align:center;padding:40px;max-width:400px}}
-.spinner{{width:40px;height:40px;border:3px solid #333;border-top:3px solid #1DB954;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 20px}}
-@keyframes spin{{to{{transform:rotate(360deg)}}}}
-h1{{font-size:24px;margin-bottom:8px}}
-p{{color:#b3b3b3;font-size:14px}}
-.ok{{color:#1DB954}}
-.err{{color:#e74c3c}}
-</style></head><body>
-<div class="card" id="c">
-<div class="spinner"></div>
-<h1>Completing login...</h1>
-<p>You can close this window now.</p>
-</div>
-<script>
-// Automatically send the code to our backend to exchange for a token
-fetch('/auth/google/complete', {{
-    method: 'POST',
-    headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify({{ code: {code_js}, session_id: {state_js} }})
-}})
-.then(r => r.json())
-.then(data => {{
-    if (data.status === 'ok') {{
-        document.getElementById('c').innerHTML = '<h1 class="ok">✓ Login Successful</h1><p>Return to the Kettle app to continue.</p>';
-        setTimeout(() => window.close(), 3000);
-    }} else {{
-        document.getElementById('c').innerHTML = '<h1 class="err">Login Failed</h1><p>' + (data.detail || 'Error exchanging code') + '</p>';
-    }}
-}})
-.catch(err => {{
-    document.getElementById('c').innerHTML = '<h1 class="err">Login Failed</h1><p>Connection error.</p>';
-}});
-</script></body></html>"""
-    return HTMLResponse(content=html)
-
-class GoogleCompleteRequest(BaseModel):
-    code: str
-    session_id: str
-
-@app.post("/auth/google/complete")
-async def google_auth_complete(req: GoogleCompleteRequest, db: AsyncSession = Depends(get_db)):
-    if not google_oauth_configured():
-        raise HTTPException(status_code=503, detail="google_oauth_not_configured")
-    if req.session_id not in pending_google_auth:
-        raise HTTPException(status_code=400, detail="Invalid session")
-    
-    session_data = pending_google_auth[req.session_id]
-    
-    # Exchange code for token using PKCE verifier
-    async with httpx.AsyncClient() as client:
-        token_res = await client.post('https://oauth2.googleapis.com/token', data={
-            'client_id': GOOGLE_CLIENT_ID,
-            'client_secret': GOOGLE_CLIENT_SECRET,
-            'code': req.code,
-            'code_verifier': session_data['verifier'],
-            'redirect_uri': GOOGLE_REDIRECT_URI,
-            'grant_type': 'authorization_code'
-        })
-        
-        if token_res.status_code != 200:
-            print(f"Token exchange failed: {token_res.text}")
-            raise HTTPException(status_code=400, detail="Failed to exchange code for token")
-        
-        tokens = token_res.json()
-        access_token = tokens.get('access_token')
-        
-        # Get user info
-        user_res = await client.get('https://www.googleapis.com/oauth2/v3/userinfo',
-                                  headers={'Authorization': f'Bearer {access_token}'})
-        if user_res.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to get user info")
-        userinfo = user_res.json()
-
-    email = userinfo.get('email')
-    if not email:
-        raise HTTPException(status_code=400, detail="Google account has no email address")
-    name = userinfo.get('name') or email.split('@')[0]
-    
-    result = await db.execute(select(User).filter(User.email == email))
-    user = result.scalars().first()
-    
-    if not user:
-        uname_check = await db.execute(select(User).filter(User.username == name))
-        if uname_check.scalars().first():
-            import random
-            name = f"{name}{random.randint(1000, 9999)}"
-        # Random password: OAuth users must sign in via Google — never a
-        # guessable scheme like google_user_<email> that allows password login
-        import secrets
-        user = User(username=name, email=email, hashed_password=get_password_hash(secrets.token_urlsafe(32)))
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-        
-    jwt_token = create_access_token(data={"sub": user.username})
-    pending_google_auth[req.session_id] = {
-        "status": "complete",
-        "access_token": jwt_token,
-        "username": user.username
-    }
-    return {"status": "ok"}
-
-@app.get("/auth/google/poll/{session_id}")
-async def google_auth_poll(session_id: str):
-    if session_id not in pending_google_auth:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = pending_google_auth[session_id]
-    if session["status"] == "complete":
-        result = dict(session)
-        del pending_google_auth[session_id]
-        return result
-    return {"status": "pending"}
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
-

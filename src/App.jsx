@@ -11,7 +11,7 @@ import axios from 'axios';
 import logoMark from './assets/logo-mark.png';
 import { useMusic } from './context/MusicContext';
 import { motion, AnimatePresence } from 'framer-motion';
-import { API_BASE, LOCAL_API, AUTH_API } from './config';
+import { API_BASE, LOCAL_API } from './config';
 import './App.css';
 
 const ONBOARDING_GENRES = [
@@ -274,16 +274,6 @@ const MOOD_CHIPS = [
   { icon: Moon, label: 'Late Night', query: 'late night drive synthwave mix' }
 ];
 
-// Inline Google 'G' — used in the login gate + Account panel sign-in button
-const GoogleIcon = ({ size = 18 }) => (
-  <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" style={{ flexShrink: 0 }}>
-    <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z" />
-    <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z" />
-    <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.519-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z" />
-    <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z" />
-  </svg>
-);
-
 // Horizontal shelf card: click = play the whole shelf as a queue
 const MediaCard = memo(({ track, list, onPlay }) => (
   <div className="music-card" style={{ minWidth: 180, width: 180 }} onClick={() => onPlay(track, list)}>
@@ -321,15 +311,12 @@ function App() {
   // Startup animation: show until the guest session resolves (min 1.9s, hard cap 6s)
   const [splashMinDone, setSplashMinDone] = useState(false);
   const [splashDone, setSplashDone] = useState(false);
-  // First-launch login gate. No account is required — the silent guest
-  // session keeps the app fully usable. Picking a name persists it locally;
-  // Google sign-in (when available — needs the bundled .env with OAuth creds)
-  // ties this device to your account in the bundled backend.
+  // First-launch gate. No account is required — the silent name-based
+  // session keeps the app fully usable. Every choice is a real cloud
+  // account (sync, friends, Jam) owned by this device.
   const [displayName, setDisplayName] = useState(() => localStorage.getItem('kettle_name') || '');
   const [nameDraft, setNameDraft] = useState('');
   const [showNamePrompt, setShowNamePrompt] = useState(false);
-  const [isGoogleSigning, setIsGoogleSigning] = useState(false);
-  const [googleAuthError, setGoogleAuthError] = useState('');
   // Per-user taste data: real plays + searches -> personalized home shelves
   const [listenHistory, setListenHistory] = useState([]);
   const [searchHistory, setSearchHistory] = useState([]);
@@ -618,78 +605,11 @@ function App() {
     setShowNamePrompt(false); // kicks off the silent guest session below
   };
 
-  // --- Google Sign-In --------------------------------------------------
-  // Opens the OAuth prompt in the system browser; the shared cloud backend
-  // handles the callback (AUTH_API = the cloud by default — see config.js).
-  // kettle_auth_mode='google' tells the silent guest session below to stay off.
-  const pollGoogleAuth = (sessionId, attempt = 0) => {
-    const MAX_ATTEMPTS = 60; // ~90s window
-    const tick = async (i) => {
-      if (i > MAX_ATTEMPTS) {
-        const hasSession = !!localStorage.getItem('token');
-        const msg = 'Timed out waiting for Google. Please try again.';
-        if (hasSession) alert(msg); else setGoogleAuthError(msg);
-        setIsGoogleSigning(false);
-        try { localStorage.removeItem('kettle_google_pending'); } catch {}
-        return;
-      }
-      try {
-        const { data } = await axios.get(`${AUTH_API}/auth/google/poll/${sessionId}`);
-        if (data?.status === 'complete' && data.access_token) {
-          try {
-            localStorage.setItem('token', data.access_token);
-            localStorage.setItem('kettle_auth_mode', 'google');
-            if (data.username) {
-              localStorage.setItem('kettle_name', data.username);
-              setDisplayName(data.username);
-            }
-            localStorage.removeItem('kettle_google_pending');
-          } catch {}
-          // Pre-hydrate from /users/me so the rest of the UI unlocks immediately
-          try {
-            const me = await axios.get(`${AUTH_API}/users/me`, { headers: { Authorization: `Bearer ${data.access_token}` } });
-            setUser(me.data);
-          } catch {
-            setUser({ username: data.username }); // good enough until next restart
-          }
-          setIsGoogleSigning(false);
-          setShowNamePrompt(false);
-          return;
-        }
-      } catch { /* still pending */ }
-      setTimeout(() => tick(i + 1), 1500);
-    };
-    tick(attempt);
-  };
-
-  const signInWithGoogle = async () => {
-    setGoogleAuthError('');
-    setIsGoogleSigning(true);
-    try {
-      const { data } = await axios.get(`${AUTH_API}/auth/google/start`);
-      if (!data?.url || !data?.session_id) throw new Error('No sign-in URL returned');
-      try { localStorage.setItem('kettle_google_pending', data.session_id); } catch {}
-      try { window.open(data.url, '_blank', 'popup,width=520,height=640')?.focus?.(); } catch { /* popup blocked — user can still click link */ }
-      pollGoogleAuth(data.session_id);
-    } catch (err) {
-      const hasSession = !!localStorage.getItem('token');
-      const detail = err?.response?.data?.detail;
-      const msg =
-        detail === 'google_oauth_not_configured'
-          ? 'Google sign-in is not enabled on this server yet. Tap your name instead — it’s a full account.'
-          : hasSession
-            ? 'Google sign-in is unavailable right now. Your name account stays fully usable.'
-            : 'Google sign-in is unavailable right now. Try your name instead.';
-      if (hasSession) alert(msg); else setGoogleAuthError(msg);
-      setIsGoogleSigning(false);
-    }
-  };
-
   // Clear the local session and return to the login gate. Used by the
   // Account panel's "Sign out" action.
   const signOut = () => {
     try {
-      ['token', 'kettle_guest', 'kettle_name', 'kettle_auth_mode', 'kettle_google_pending', 'kettle_recent', 'kettle_friends']
+      ['token', 'kettle_guest', 'kettle_name', 'kettle_auth_mode', 'kettle_recent', 'kettle_friends']
         .forEach(k => localStorage.removeItem(k));
     } catch {}
     // Wipe every session-scoped taste cache so a different account on this
@@ -712,7 +632,9 @@ function App() {
   // Everything after that is automatic: the app is simply usable without
   // logging in. Runs only once a display name exists.
   useEffect(() => {
-    if (localStorage.getItem('kettle_auth_mode') === 'google') return; // Google sign-in drives its own session
+    // Normalize stale mode from before Google auth was removed — otherwise
+    // this account would silently never sign in again
+    try { if (localStorage.getItem('kettle_auth_mode') === 'google') localStorage.setItem('kettle_auth_mode', 'guest'); } catch {}
     if (!displayName) return; // waiting on the first-launch name gate
     let cancelled = false;
 
@@ -1366,7 +1288,7 @@ function App() {
               {friends.length === 0 && friendRequests.length === 0 && !ownFriendCode && (
                 <div className="friend-code-pending">
                   <p>Friend sync ships with the next cloud update. Check again after it deploys.</p>
-                  <button className="friend-code-google-btn" onClick={refreshSessionFromCloud}>
+                  <button className="friend-code-check-btn" onClick={refreshSessionFromCloud}>
                     <RefreshCw size={16} /> Check again
                   </button>
                 </div>
@@ -2092,20 +2014,7 @@ function App() {
               </div>
 
               <div className="account-footer">
-                {localStorage.getItem('kettle_auth_mode') === 'google' ? (
-                  <button className="account-footer-btn" onClick={signOut}>
-                    <GoogleIcon size={16} strokeWidth={2} /> Switch account
-                  </button>
-                ) : (
-                  <>
-                    <button className="account-footer-btn primary" onClick={signInWithGoogle}>
-                      <GoogleIcon size={16} strokeWidth={2} /> Sign in with Google
-                    </button>
-                    <button className="account-footer-btn" onClick={signOut}>
-                      Switch guest name
-                    </button>
-                  </>
-                )}
+                <button className="account-footer-btn primary" onClick={signOut}>Switch name</button>
                 <p className="version-tag">Kettle v1.1.0</p>
               </div>
             </motion.div>
@@ -2473,7 +2382,7 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* LOGIN GATE — pick a name (guest, no account) or sign in with Google */}
+      {/* LOGIN GATE — pick a name */}
       <AnimatePresence>
         {showNamePrompt && (
           <motion.div
@@ -2491,29 +2400,7 @@ function App() {
             >
               <img src={logoMark} alt="" className="name-logo" />
               <h2>Welcome to Kettle</h2>
-              <p>Jump straight in as a guest, or sign in to sync your library across devices.</p>
-
-              <button
-                className="google-btn"
-                onClick={signInWithGoogle}
-                disabled={isGoogleSigning}
-                aria-busy={isGoogleSigning}
-              >
-                {isGoogleSigning ? (
-                  <span className="google-spinner" aria-hidden="true" />
-                ) : (
-                  <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
-                    <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z" />
-                    <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z" />
-                    <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.519-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z" />
-                    <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z" />
-                  </svg>
-                )}
-                <span>{isGoogleSigning ? 'Waiting for Google…' : 'Continue with Google'}</span>
-              </button>
-              {googleAuthError && <p className="google-error" role="alert">{googleAuthError}</p>}
-
-              <div className="or-divider"><span>or</span></div>
+              <p>Pick a name — your account syncs your library, friends and Jam sessions on every device.</p>
 
               <form onSubmit={submitName}>
                 <input
@@ -2523,13 +2410,12 @@ function App() {
                   placeholder="Your name"
                   maxLength={24}
                   aria-label="Your name"
-                  disabled={isGoogleSigning}
                 />
-                <button type="submit" disabled={!nameDraft.trim() || isGoogleSigning}>
+                <button type="submit" disabled={!nameDraft.trim()}>
                   Start listening
                 </button>
               </form>
-              <p className="fineprint">Guests keep everything on this device. Google ties it to your account so every app session syncs.</p>
+              <p className="fineprint">No account required. Your name is all this app needs — you get a unique code and your taste syncs like magic.</p>
             </motion.div>
           </motion.div>
         )}
