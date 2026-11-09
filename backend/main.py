@@ -10,12 +10,12 @@ from fastapi import FastAPI, HTTPException, Query, Depends, status, WebSocket, W
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, or_
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from music_engine import MusicEngine
 from database import init_db, get_db
-from models import User, Song, Playlist, LikedSong, ListenHistory, Room, RoomParticipant, SearchHistory
+from models import User, Song, Playlist, LikedSong, ListenHistory, Room, RoomParticipant, SearchHistory, Friendship
 from auth import (
     get_password_hash, verify_password, create_access_token,
     get_current_user, oauth2_scheme, oauth2_scheme_optional,
@@ -29,7 +29,32 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 
-load_dotenv()
+# Load .env from either the bundled location (next to the PyInstaller exe,
+# where electron-builder places extraResources), the legacy userData dir,
+# or the current working directory (dev mode runs from backend/).
+def _resolve_dotenv_path() -> str | None:
+    import sys
+    candidates = []
+    # 1) Bundled: next to the running exe (electron-builder extraResources)
+    exe_dir = os.path.dirname(getattr(sys, 'executable', '')) or os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(exe_dir, '.env'))
+    # 2) PyInstaller one-file extraction dir (as returned by _MEIPASS)
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        candidates.append(os.path.join(meipass, '.env'))
+    # 3) userData resources (older electron-builder target dirs)
+    appdata = os.getenv('APPDATA') or os.path.expanduser('~')
+    candidates.append(os.path.join(appdata, 'Kettle', '.env'))
+    # 4) cwd (dev: python main.py / uvicorn launched from backend/)
+    candidates.append(os.path.abspath('.env'))
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+_dotenv_path = _resolve_dotenv_path()
+if _dotenv_path:
+    load_dotenv(_dotenv_path)
 
 app = FastAPI(title="Kettle API")
 
@@ -121,21 +146,322 @@ async def login(form_data: UserCreate, db: AsyncSession = Depends(get_db)):
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
+# Generate a unique, human-shareable friend code like "KT-AB4FCK" — 6 chars
+# from a no-ambiguous alphabet (no 0, O, 1, I, L). Collision-safe: retries
+# up to 10 times with progressively longer suffix if needed (uncommon).
+_FRIEND_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+def _generate_friend_code() -> str:
+    import random
+    for _ in range(10):
+        body = "".join(random.choice(_FRIEND_ALPHABET) for _ in range(6))
+        return f"KT-{body}"
+    return f"KT-{int(time.time() * 1000000) % (36 ** 6):06X}"
+
+async def _ensure_friend_code(user, db: AsyncSession):
+    if user.friend_code:
+        return user.friend_code
+    for _ in range(10):
+        code = _generate_friend_code()
+        existing = await db.execute(select(User).filter(User.friend_code == code))
+        if existing.scalars().first() is None:
+            user.friend_code = code
+            return code
+    user.friend_code = f"KT-{user.id:06d}"
+    return user.friend_code
+
+
+def _is_online(user):
+    if not user.last_seen:
+        return False
+    delta = datetime.utcnow() - user.last_seen
+    return delta.total_seconds() < 300  # 5 min freshness window
+
+
+def _user_public(user, mut: bool = False):
+    """Public-safe subset of profile fields — friends can see these."""
+    return {
+        "id": user.id,
+        "username": user.username,
+        "friend_code": user.friend_code,
+        "bio": getattr(user, 'bio', '') or '',
+        "profile_photo": user.profile_photo,
+        "created_at": user.created_at.isoformat() if getattr(user, 'created_at', None) else None,
+        "last_seen": (user.last_seen.isoformat() if getattr(user, 'last_seen', None) else None),
+        "is_online": _is_online(user),
+    }
+
+class FriendRequest(BaseModel):
+    friend_code: Optional[str] = None
+    username: Optional[str] = None
+    message: Optional[str] = ""
+
+class FriendAction(BaseModel):
+    action: str  # "accept" | "decline"
+
+class ProfilePatch(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None
+    bio: Optional[str] = None
+
+
 @app.get("/users/me")
 async def read_users_me(username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).filter(User.username == username))
     user = result.scalars().first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    await _ensure_friend_code(user, db)
+    user.last_seen = datetime.utcnow()
+    await db.commit()
+    await db.refresh(user)
+    friend_count = (await db.execute(select(func.count()).select_from(Friendship).filter(
+        Friendship.status == 'accepted',
+        ((Friendship.requester_id == user.id) | (Friendship.addressee_id == user.id))
+    ))).scalar() or 0
     return {
         "id": user.id,
-        "username": user.username, 
-        "email": user.email, 
+        "username": user.username,
+        "email": user.email,
         "onboarding_completed": user.onboarding_completed,
         "profile_photo": user.profile_photo,
         "current_queue": user.current_queue,
-        "playback_state": user.playback_state
+        "playback_state": user.playback_state,
+        "friend_code": user.friend_code,
+        "bio": user.bio or '',
+        "last_seen": user.last_seen.isoformat() if user.last_seen else None,
+        "friend_count": friend_count,
+        "created_at": user.created_at.isoformat() if user.created_at else None
     }
+
+# --- FRIENDS / SOCIAL -------------------------------------------------
+
+@app.get("/users/search")
+async def search_users(
+    q: str = Query(..., min_length=1),
+    username: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Find users by username substring or exact friend code."""
+    me = (await db.execute(select(User).filter(User.username == username))).scalars().first()
+    if not me:
+        raise HTTPException(status_code=404, detail="User not found")
+    q_l = q.strip().lower()
+    if not q_l:
+        return []
+    # Friend-code lookup: accept "ktfp868s", "kt-fp868s", "FP868S", full codes,
+    # or just the random tail ("fp868s"). All resolve to "KT-FP868SX%" LIKE.
+    scrub = q_l.replace("-", "").replace("kt", "")
+    if scrub and len(scrub) >= 2:
+        normalized_code = f"KT-{scrub.upper()}"
+        code_clause = func.upper(User.friend_code).like(f"{normalized_code}%")
+    else:
+        code_clause = False
+    stmt = select(User).where(
+        User.id != me.id,
+        or_(
+            func.lower(User.username).like(f"%{q_l}%"),
+            code_clause,
+        ),
+    ).order_by(User.last_seen.desc().nulls_last()).limit(20)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_user_public(u) for u in rows]
+
+@app.post("/friends/request")
+async def send_friend_request(
+    data: FriendRequest,
+    username: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    me = (await db.execute(select(User).filter(User.username == username))).scalars().first()
+    if not me:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    target = None
+    if data.friend_code:
+        clean = data.friend_code.upper().replace("-", "").lstrip("KT").strip()
+        normalized = f"KT-{clean if clean else ''}"
+        target = (await db.execute(select(User).where(User.friend_code == normalized))).scalars().first()
+    elif data.username:
+        target = (await db.execute(select(User).where(User.username == data.username))).scalars().first()
+    else:
+        raise HTTPException(status_code=400, detail="Provide friend_code or username")
+
+    if not target:
+        raise HTTPException(status_code=404, detail="No user matches that code or username")
+    if target.id == me.id:
+        raise HTTPException(status_code=400, detail="That's you — you can't friend yourself")
+
+    existing = (await db.execute(select(Friendship).where(or_(
+        (Friendship.requester_id == me.id) & (Friendship.addressee_id == target.id),
+        (Friendship.requester_id == target.id) & (Friendship.addressee_id == me.id),
+    )))).scalars().first()
+
+    if existing:
+        if existing.status == 'accepted':
+            return {"status": "already_friends", "user": _user_public(target)}
+        if existing.status == 'pending':
+            direction = "outgoing" if existing.requester_id == me.id else "incoming"
+            return {"status": "pending", "direction": direction, "friendship_id": existing.id}
+        # Re-activate declined requests
+        existing.requester_id = me.id
+        existing.addressee_id = target.id
+        existing.status = 'pending'
+        existing.request_message = data.message or ''
+        existing.created_at = datetime.utcnow()
+        existing.responded_at = None
+        await db.commit()
+        return {"status": "pending", "direction": "outgoing", "friendship_id": existing.id}
+
+    newf = Friendship(
+        requester_id=me.id,
+        addressee_id=target.id,
+        status='pending',
+        request_message=data.message or '',
+    )
+    db.add(newf)
+    await db.commit()
+    return {"status": "pending", "direction": "outgoing", "friendship_id": newf.id, "user": _user_public(target)}
+
+@app.get("/friends")
+async def list_friends(
+    username: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    me = (await db.execute(select(User).filter(User.username == username))).scalars().first()
+    if not me:
+        raise HTTPException(status_code=404, detail="User not found")
+    rows = (await db.execute(select(Friendship).where(
+        Friendship.status == 'accepted',
+        or_(Friendship.requester_id == me.id, Friendship.addressee_id == me.id),
+    ))).scalars().all()
+    if not rows:
+        return []
+    other_ids = [f.addressee_id if f.requester_id == me.id else f.requester_id for f in rows]
+    users = {u.id: u for u in (await db.execute(select(User).where(User.id.in_(other_ids)))).scalars().all()}
+    out = []
+    for f in rows:
+        oid = f.addressee_id if f.requester_id == me.id else f.requester_id
+        o = users.get(oid)
+        if o:
+            out.append({
+                "friendship_id": f.id,
+                "since": f.created_at.isoformat() if f.created_at else None,
+                **_user_public(o),
+            })
+    return out
+
+@app.get("/friend-requests")
+async def list_friend_requests(
+    username: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    me = (await db.execute(select(User).filter(User.username == username))).scalars().first()
+    if not me:
+        raise HTTPException(status_code=404, detail="User not found")
+    rows = (await db.execute(select(Friendship).where(
+        Friendship.addressee_id == me.id,
+        Friendship.status == 'pending',
+    ).order_by(Friendship.created_at.desc()))).scalars().all()
+    if not rows:
+        return []
+    req_ids = [f.requester_id for f in rows]
+    users = {u.id: u for u in (await db.execute(select(User).where(User.id.in_(req_ids)))).scalars().all()}
+    out = []
+    for f in rows:
+        r = users.get(f.requester_id)
+        if r:
+            out.append({
+                "friendship_id": f.id,
+                "message": f.request_message or "",
+                "sent_at": f.created_at.isoformat() if f.created_at else None,
+                **_user_public(r),
+            })
+    return out
+
+@app.post("/friends/respond/{friendship_id}")
+async def respond_friend_request(
+    friendship_id: int,
+    data: FriendAction,
+    username: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    me = (await db.execute(select(User).filter(User.username == username))).scalars().first()
+    if not me:
+        raise HTTPException(status_code=404, detail="User not found")
+    f = await db.get(Friendship, friendship_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="Friend request not found")
+    if f.addressee_id != me.id:
+        raise HTTPException(status_code=403, detail="Not your friend request")
+    if f.status != 'pending':
+        raise HTTPException(status_code=400, detail="Request already handled")
+    if data.action == 'accept':
+        f.status = 'accepted'
+        f.responded_at = datetime.utcnow()
+    elif data.action == 'decline':
+        f.status = 'declined'
+        f.responded_at = datetime.utcnow()
+    else:
+        raise HTTPException(status_code=400, detail="Action must be 'accept' or 'decline'")
+    await db.commit()
+    return {"status": f.status, "friendship_id": f.id}
+
+@app.delete("/friends/{friendship_id}")
+async def remove_friend(
+    friendship_id: int,
+    username: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    me = (await db.execute(select(User).filter(User.username == username))).scalars().first()
+    if not me:
+        raise HTTPException(status_code=404, detail="User not found")
+    f = await db.get(Friendship, friendship_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="Friend entry not found")
+    if f.requester_id != me.id and f.addressee_id != me.id:
+        raise HTTPException(status_code=403, detail="Not yours")
+    await db.delete(f)
+    await db.commit()
+    return {"status": "removed", "friendship_id": friendship_id}
+
+@app.get("/suggested-friends")
+async def suggested_friends(
+    username: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Taste-overlap suggestions: ranked by preferred_genres overlap with you."""
+    me = (await db.execute(select(User).filter(User.username == username))).scalars().first()
+    if not me:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    pairs_q = await db.execute(select(Friendship).where(or_(
+        Friendship.requester_id == me.id,
+        Friendship.addressee_id == me.id,
+    )))
+    touched = set()
+    for f in pairs_q.scalars().all():
+        touched.add(f.requester_id)
+        touched.add(f.addressee_id)
+
+    my_genres = set(g for g in (me.preferred_genres or []) if isinstance(g, str))
+    rows_q = await db.execute(
+        select(User).where(
+            User.id != me.id,
+            ~User.id.in_(touched) if touched else True,
+        ).order_by(User.last_seen.desc()).limit(80)
+    )
+    rows = rows_q.scalars().all()
+
+    scored = []
+    for u in rows:
+        their = set(g for g in (u.preferred_genres or []) if isinstance(g, str))
+        overlap = len(my_genres & their)
+        recency = (datetime.utcnow() - u.last_seen).total_seconds() if u.last_seen else 1e18
+        scored.append((overlap, recency, u))
+    # Prefer genre-match, then recency
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [_user_public(u) for _, _, u in scored[:8]]
 
 class OnboardingData(BaseModel):
     genres: List[str]
@@ -326,6 +652,7 @@ class UserProfileUpdate(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
     profile_photo: Optional[str] = None
+    bio: Optional[str] = None
 
 @app.put("/users/profile")
 async def update_profile(data: UserProfileUpdate, username: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -333,22 +660,31 @@ async def update_profile(data: UserProfileUpdate, username: str = Depends(get_cu
     user = result.scalars().first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     if data.username:
         # Check if username is already taken by someone else
         check = await db.execute(select(User).filter(User.username == data.username, User.id != user.id))
         if check.scalars().first():
             raise HTTPException(status_code=400, detail="Username already taken")
         user.username = data.username
-    
+
     if data.email:
         user.email = data.email
+    if data.bio is not None:
+        user.bio = data.bio[:160]  # keep short
 
     if data.profile_photo:
         user.profile_photo = data.profile_photo
-        
+
     await db.commit()
-    return {"message": "Profile updated", "username": user.username, "email": user.email, "profile_photo": user.profile_photo}
+    await db.refresh(user)
+    return {
+        "message": "Profile updated",
+        "username": user.username,
+        "email": user.email,
+        "profile_photo": user.profile_photo,
+        "bio": user.bio,
+    }
 
 @app.post("/upload-to-catbox")
 async def upload_proxy(file: UploadFile = File(...)):

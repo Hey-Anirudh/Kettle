@@ -900,12 +900,25 @@ body {
 .setting-item.danger:hover { background: rgba(255, 77, 77, 0.1); }
 
 .account-footer {
-  padding: 24px;
+  padding: 20px 24px 24px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
   border-top: 1px solid var(--border);
 }
+.account-footer-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; padding: 12px 14px;
+  background: rgba(255,255,255,0.04); color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+  transition: var(--transition);
+}
+.account-footer-btn:hover { border-color: var(--primary-accent); background: rgba(230,0,0,0.08); }
+.account-footer-btn.primary {
+  background: #fff; color: #1f1f1f; border-color: transparent;
+}
+.account-footer-btn.primary:hover { filter: brightness(0.96); background: #fff; }
 
 .logout-button-full {
   width: 100%;
@@ -931,7 +944,164 @@ body {
   color: var(--text-dim);
 }
 
-/* === Logo === */
+/* ============================================================
+/* Pending-friend-code helper (the shared backend before a manual deploy) */
+.friend-code-pending {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+  padding: 12px; border-radius: 12px;
+  background: linear-gradient(135deg, #141414, #0a0a0a);
+  border: 1px solid var(--border);
+}
+.friend-code-pending p {
+  font-size: 12px; color: var(--text-muted); line-height: 1.4;
+}
+.friend-code-google-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #ffffff; color: #1f1f1f;
+  border: none; border-radius: 999px;
+  padding: 8px 14px; font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: var(--transition);
+}
+.friend-code-google-btn:hover { filter: brightness(0.96); transform: translateY(-1px); }
+
+/* ============================================================
+   FRIENDS — DB-backed social layer
+   ============================================================ */
+.friends-section { overflow: visible; }
+.friends-body { padding: 0 8px 12px; display: flex; flex-direction: column; gap: 10px; overflow: visible; }
+.friends-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 6px; border-radius: 9px;
+  background: var(--primary-accent); color: #fff;
+  font-size: 11px; font-weight: 800; margin-left: 4px;
+}
+
+/* Sticky own-code card — tappable to copy */
+.friend-code-card {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: linear-gradient(135deg, #1c1c1c, #101010);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.friend-code-card:hover { border-color: var(--primary-accent); transform: translateY(-1px); }
+.friend-code-card-label {
+  font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--text-dim); font-weight: 700;
+}
+.friend-code-value {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 18px; font-weight: 800; letter-spacing: 4px;
+  color: var(--text); margin: 4px 0 6px;
+  user-select: all;
+}
+.friend-code-hint {
+  font-size: 10px; color: var(--primary-accent); font-weight: 700; letter-spacing: 0.5px;
+}
+
+/* Add-friend inline box */
+.friends-join-box input { font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; letter-spacing: 1px; }
+
+/* Pending requests inbox block */
+.friend-requests-block {
+  background: rgba(230, 0, 0, 0.08);
+  border: 1px solid rgba(230, 0, 0, 0.22);
+  border-radius: 12px;
+  padding: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.friend-requests-label {
+  font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--primary-accent); font-weight: 800;
+}
+.friend-request-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+  border-radius: 8px; transition: background 0.15s ease;
+}
+.friend-request-row:hover { background: rgba(255,255,255,0.04); }
+.friend-msg { font-size: 11px; color: var(--text-muted); font-style: italic; }
+.friend-actions { display: flex; gap: 6px; margin-left: auto; }
+.friend-actions button {
+  width: 26px; height: 26px; border-radius: 50%; border: none;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  transition: var(--transition);
+}
+.friend-actions button:first-child { background: #1db954; color: #0a0a0a; }
+.friend-actions button:last-child { background: rgba(255,255,255,0.06); color: var(--text-muted); }
+.friend-actions button:hover { transform: scale(1.1); }
+
+/* Friends list */
+.friends-list {
+  display: flex; flex-direction: column;
+  max-height: 200px; overflow-y: auto;
+  gap: 4px;
+}
+.friend-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 6px;
+  border-radius: 8px; transition: background 0.15s ease;
+  cursor: default;
+}
+.friend-row:hover { background: var(--elevated-hover); }
+.friend-meta { display: flex; flex-direction: column; min-width: 0; }
+.friend-name { font-size: 13px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+.friend-status { font-size: 11px; color: var(--text-dim); }
+.friend-remove-btn {
+  margin-left: auto; width: 22px; height: 22px; border-radius: 6px; border: none;
+  background: transparent; color: var(--text-dim); cursor: pointer; opacity: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.friend-row:hover .friend-remove-btn { opacity: 1; }
+.friend-remove-btn:hover { background: rgba(255,77,77,0.15); color: #ff4d4d; }
+.friends-list::-webkit-scrollbar { width: 4px; }
+.friends-list::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+
+/* Suggested friends */
+.suggested-friends-block {
+  display: flex; flex-direction: column; gap: 4px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  padding-top: 8px;
+}
+.friend-add-btn {
+  margin-left: auto; width: 24px; height: 24px; border-radius: 6px; border: none;
+  background: rgba(255,255,255,0.06); color: var(--primary-accent); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: var(--transition);
+}
+.friend-add-btn:hover { background: rgba(230,0,0,0.15); color: #ff4d4d; }
+
+/* Friend code pill — appears in account profile hero */
+.friend-code-pill {
+  display: inline-flex; align-items: center; gap: 10px;
+  background: #131313;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 8px 6px 14px;
+  cursor: pointer;
+  transition: var(--transition);
+  margin-top: 8px; width: fit-content;
+}
+.friend-code-pill:hover { border-color: var(--primary-accent); background: #161616; }
+.friend-code-pill-label {
+  font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--text-dim); font-weight: 800;
+}
+.friend-code-pill-value {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 13px; font-weight: 800; letter-spacing: 2px;
+  color: var(--text);
+  user-select: all;
+}
+.friend-code-pill-copy {
+  background: var(--primary-accent); color: #fff;
+  font-size: 10px; font-weight: 800;
+  padding: 4px 10px; border-radius: 999px;
+}
+
+/* Bio textarea in Edit Profile */
+.edit-input { resize: vertical; min-height: 56px; font-family: inherit; }
 .logo { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:900; letter-spacing:-0.5px; cursor:pointer; user-select:none; }
 /* The old icon was a black SQUARE cropped to a circle on a near-black
    sidebar — invisible. logo-mark.png is the transparent, cropped mark;
@@ -1810,7 +1980,7 @@ body {
 }
 
 /* ============================================================
-   NAME GATE — first launch asks what to call the user
+   LOGIN GATE — guest-by-name OR Sign in with Google
    ============================================================ */
 .name-gate {
   position: fixed; inset: 0; z-index: 4900;
@@ -1818,24 +1988,64 @@ body {
   display: flex; align-items: center; justify-content: center;
 }
 .name-card {
-  width: min(400px, calc(100vw - 48px));
+  width: min(420px, calc(100vw - 48px));
   display: flex; flex-direction: column; align-items: center; text-align: center;
+  background: #0d0d0d;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 24px;
+  padding: 40px 32px 28px;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.5);
 }
 .name-logo {
-  width: 56px; height: 56px; object-fit: contain; opacity: 0.9;
+  width: 64px; height: 64px; object-fit: contain; opacity: 0.95;
   animation: logoSpin 14s linear infinite;
 }
 .name-card h2 {
-  margin-top: 22px; font-size: 24px; font-weight: 800; letter-spacing: -0.4px;
+  margin-top: 18px; font-size: 28px; font-weight: 900; letter-spacing: -0.6px;
   color: var(--text);
 }
-.name-card p {
-  margin-top: 8px; font-size: 13.5px; line-height: 1.55;
-  color: var(--text-muted);
+.name-card > p {
+  margin-top: 6px; font-size: 14px; line-height: 1.55; color: var(--text-muted);
 }
-.name-card p strong { color: var(--text); font-weight: 700; }
-.name-card input {
-  margin-top: 26px; width: 100%;
+
+/* Google sign-in button — the recommended path */
+.google-btn {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  margin-top: 22px; width: 100%;
+  height: 48px; border-radius: 12px;
+  background: #ffffff; color: #1f1f1f;
+  border: none; cursor: pointer;
+  font-size: 15px; font-weight: 700; letter-spacing: -0.1px;
+  transition: filter 0.18s ease, transform 0.18s ease;
+}
+.google-btn:hover:not(:disabled) { filter: brightness(0.97); transform: translateY(-1px); }
+.google-btn:disabled { opacity: 0.7; cursor: default; }
+.google-error {
+  margin-top: 10px; font-size: 13px; color: #ff5656; font-weight: 600;
+}
+.google-spinner {
+  width: 18px; height: 18px; border: 2px solid rgba(31,31,31,0.2); border-top-color: #1f1f1f;
+  border-radius: 50%; animation: logoSpin 0.8s linear infinite;
+}
+
+/* Subtle vertical divider between Google and guest-name sections */
+.or-divider {
+  display: flex; align-items: center; width: 100%;
+  margin: 18px 0;
+  color: var(--text-dim); font-size: 12px; font-weight: 700;
+  letter-spacing: 1.5px; text-transform: uppercase;
+}
+.or-divider::before, .or-divider::after {
+  content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.08);
+}
+.or-divider span { padding: 0 12px; }
+
+/* Guest-name fallback path */
+.name-card form {
+  width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.name-card form input {
+  width: 100%;
   background: rgba(255,255,255,0.05);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -1845,19 +2055,28 @@ body {
   outline: none;
   transition: var(--transition);
 }
-.name-card input::placeholder { color: var(--text-dim); font-weight: 500; }
-.name-card input:focus { border-color: var(--primary-accent); background: rgba(255,255,255,0.07); }
-.name-card button {
-  margin-top: 12px; width: 100%;
-  background: var(--primary-accent); color: #fff;
-  border: none; border-radius: 12px;
-  padding: 14px 16px;
+.name-card form input::placeholder { color: var(--text-dim); font-weight: 500; }
+.name-card form input:focus { border-color: var(--primary-accent); background: rgba(255,255,255,0.07); }
+.name-card form button {
+  margin-top: 4px; width: 100%;
+  background: transparent; color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 16px;
   font-size: 14.5px; font-weight: 800;
   cursor: pointer;
   transition: var(--transition);
 }
-.name-card button:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
-.name-card button:disabled { opacity: 0.4; cursor: default; }
+.name-card form button:hover:not(:disabled) { border-color: var(--primary-accent); color: #fff; }
+.name-card form button:disabled { opacity: 0.4; cursor: default; }
+.fineprint {
+  width: 100%; margin-top: 18px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06);
+  font-size: 11px; line-height: 1.5; color: var(--text-dim);
+}
+/* The gate renders behind the open View while the user fills in a name — no twists */
+@media (max-width: 480px) {
+  .name-card { padding: 28px 20px 22px; }
+  .name-card h2 { font-size: 22px; }
+}
 
 /* ============================================================
    HOME — vibe hero, Continue Listening, personalized shelves

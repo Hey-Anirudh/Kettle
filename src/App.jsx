@@ -11,7 +11,7 @@ import axios from 'axios';
 import logoMark from './assets/logo-mark.png';
 import { useMusic } from './context/MusicContext';
 import { motion, AnimatePresence } from 'framer-motion';
-import { API_BASE } from './config';
+import { API_BASE, LOCAL_API, AUTH_API } from './config';
 import './App.css';
 
 const ONBOARDING_GENRES = [
@@ -274,6 +274,16 @@ const MOOD_CHIPS = [
   { icon: Moon, label: 'Late Night', query: 'late night drive synthwave mix' }
 ];
 
+// Inline Google 'G' — used in the login gate + Account panel sign-in button
+const GoogleIcon = ({ size = 18 }) => (
+  <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" style={{ flexShrink: 0 }}>
+    <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z" />
+    <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z" />
+    <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.519-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z" />
+    <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z" />
+  </svg>
+);
+
 // Horizontal shelf card: click = play the whole shelf as a queue
 const MediaCard = memo(({ track, list, onPlay }) => (
   <div className="music-card" style={{ minWidth: 180, width: 180 }} onClick={() => onPlay(track, list)}>
@@ -295,7 +305,7 @@ function App() {
     queue, setQueue, showQueue, setShowQueue,
     likedSongs, setLikedSongs, toggleLike,
     playlists, fetchPlaylists, createPlaylist, addToPlaylist,
-    recentTracks,
+    recentTracks, setRecentTracks,
     currentRoom, joinRoom, leaveRoom, roomParticipants, isRoomHost,
     roomSettings, updateRoomSettings,
     audioRef
@@ -311,10 +321,15 @@ function App() {
   // Startup animation: show until the guest session resolves (min 1.9s, hard cap 6s)
   const [splashMinDone, setSplashMinDone] = useState(false);
   const [splashDone, setSplashDone] = useState(false);
-  // First-launch name gate: ask what to call the user (no account, no login)
+  // First-launch login gate. No account is required — the silent guest
+  // session keeps the app fully usable. Picking a name persists it locally;
+  // Google sign-in (when available — needs the bundled .env with OAuth creds)
+  // ties this device to your account in the bundled backend.
   const [displayName, setDisplayName] = useState(() => localStorage.getItem('kettle_name') || '');
   const [nameDraft, setNameDraft] = useState('');
   const [showNamePrompt, setShowNamePrompt] = useState(false);
+  const [isGoogleSigning, setIsGoogleSigning] = useState(false);
+  const [googleAuthError, setGoogleAuthError] = useState('');
   // Per-user taste data: real plays + searches -> personalized home shelves
   const [listenHistory, setListenHistory] = useState([]);
   const [searchHistory, setSearchHistory] = useState([]);
@@ -340,6 +355,7 @@ function App() {
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editUsername, setEditUsername] = useState("");
   const [editEmail, setEditEmail] = useState("");
+  const [editBio, setEditBio] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [dragProgress, setDragProgress] = useState(0);
@@ -349,23 +365,149 @@ function App() {
   const [fpCopied, setFpCopied] = useState(false);
   const [fpIdle, setFpIdle] = useState(false);
   
-  // Friends System
-  const [friends, setFriends] = useState(() => {
-    // Corrupted localStorage must not white-screen the whole app at mount
-    try { return JSON.parse(localStorage.getItem('kettle_friends')) || []; }
-    catch { return []; }
-  });
+  // Friends System — DB-connected. The bundle used to keep this in
+  // localStorage with fake isOnline. Now friend records, friend codes,
+  // suggestions and incoming requests all hit /friends/*.
+  const [friends, setFriends] = useState([]);
+  const [friendRequests, setFriendRequests] = useState([]);
+  const [suggestedFriends, setSuggestedFriends] = useState([]);
+  const [ownFriendCode, setOwnFriendCode] = useState('');
   const [isAddingFriend, setIsAddingFriend] = useState(false);
-  const [newFriendName, setNewFriendName] = useState("");
+  const [newFriendCodeDraft, setNewFriendCodeDraft] = useState('');
+  const [copiedFriendCode, setCopiedFriendCode] = useState(false);
 
-  const handleAddFriend = () => {
-    if (newFriendName.trim()) {
-      const updatedFriends = [...friends, { username: newFriendName.trim(), isOnline: Math.random() > 0.5 }];
-      setFriends(updatedFriends);
-      localStorage.setItem('kettle_friends', JSON.stringify(updatedFriends));
-      setNewFriendName("");
-      setIsAddingFriend(false);
+  // Deterministic color + initials per username — avoids external HTTP
+  // dependency (i.pravatar.cc) for avatars
+  const InitialsAvatar = ({ username, photo, size = 32, online }) => (
+    photo
+      ? <img src={photo} style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover' }} alt="" />
+      : <div style={{
+          width: size, height: size, borderRadius: '50%',
+          background: avatarColor(username),
+          color: '#fff', fontSize: Math.max(11, Math.floor(size * 0.4)),
+          fontWeight: 800, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', letterSpacing: '0.5px'
+        }}>{(username || '?')[0].toUpperCase()}</div>
+  );
+
+  const avatarColor = (name) => {
+    let h = 2166136261 >>> 0;
+    const s = String(name || '??');
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 16777619) >>> 0; }
+    const hues = [0, 25, 50, 100, 150, 200, 250, 290, 330];
+    const pick = hues[h % hues.length];
+    return `linear-gradient(135deg, hsl(${pick} 70% 40%), hsl(${(pick + 30) % 360} 80% 30%))`;
+  };
+
+  const relativeTime = (iso) => {
+    const d = iso ? new Date(iso) : null;
+    if (!d) return 'a while ago';
+    const diffMin = Math.max(0, Math.floor((Date.now() - d.getTime()) / 60000));
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffMin < 1440) {
+      const h = Math.floor(diffMin / 60);
+      return `${h}h ago`;
     }
+    const days = Math.floor(diffMin / 1440);
+    return days <= 1 ? 'yesterday' : `${days}d ago`;
+  };
+
+  // Refresh friends + requests + suggestions on every session / mutation.
+  // Called whenever the user object or pending-request count changes.
+  const refreshFriends = useCallback(async () => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+      const [friendsRes, reqRes] = await Promise.all([
+        axios.get(`${API_BASE}/friends`, { headers: { Authorization: `Bearer ${token}` } }),
+        axios.get(`${API_BASE}/friend-requests`, { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+      setFriends(Array.isArray(friendsRes.data) ? friendsRes.data : []);
+      setFriendRequests(Array.isArray(reqRes.data) ? reqRes.data : []);
+    } catch (e) {
+      console.warn('friends refresh failed', e);
+    }
+  }, []);
+
+  const refreshSuggested = useCallback(async () => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+      const res = await axios.get(`${API_BASE}/suggested-friends`, { headers: { Authorization: `Bearer ${token}` } });
+      setSuggestedFriends(Array.isArray(res.data) ? res.data : []);
+    } catch {}
+  }, []);
+
+  const submitFriendRequest = async (e) => {
+    e?.preventDefault?.();
+    if (!newFriendCodeDraft) return;
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    const payload = newFriendCodeDraft.startsWith('KT-')
+      ? { friend_code: newFriendCodeDraft }
+      : { username: newFriendCodeDraft.toLowerCase() };
+    try {
+      const res = await axios.post(`${API_BASE}/friends/request`, payload, { headers: { Authorization: `Bearer ${token}` } });
+      setNewFriendCodeDraft('');
+      setIsAddingFriend(false);
+      await Promise.all([refreshFriends(), refreshSuggested()]);
+      if (res.data?.status === 'already_friends') {
+        alert('You’re already friends with this person.');
+      }
+    } catch (err) {
+      const detail = err?.response?.data?.detail || 'Could not send friend request';
+      alert(detail);
+    }
+  };
+
+  const sendFriendRequestFor = async (code) => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+      await axios.post(`${API_BASE}/friends/request`, { friend_code: code }, { headers: { Authorization: `Bearer ${token}` } });
+      await Promise.all([refreshFriends(), refreshSuggested()]);
+    } catch (err) {
+      alert(err?.response?.data?.detail || 'Could not send friend request');
+    }
+  };
+
+  const respondToFriendRequest = async (friendshipId, action) => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+      await axios.post(`${API_BASE}/friends/respond/${friendshipId}`, { action }, { headers: { Authorization: `Bearer ${token}` } });
+      await Promise.all([refreshFriends(), refreshSuggested()]);
+    } catch (err) {
+      alert(err?.response?.data?.detail || 'Could not update friend request');
+    }
+  };
+
+  const removeFriend = async (friendshipId) => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+      await axios.delete(`${API_BASE}/friends/${friendshipId}`, { headers: { Authorization: `Bearer ${token}` } });
+      await Promise.all([refreshFriends(), refreshSuggested()]);
+    } catch (err) {
+      alert(err?.response?.data?.detail || 'Could not remove friend');
+    }
+  };
+
+  const copyFriendCode = async () => {
+    if (!ownFriendCode) return;
+    try {
+      await navigator.clipboard.writeText(ownFriendCode);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = ownFriendCode;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    setCopiedFriendCode(true);
+    setTimeout(() => setCopiedFriendCode(false), 1800);
   };
 
   const fileInputRef = useRef(null);
@@ -396,6 +538,17 @@ function App() {
   const prevPageRef = useRef('home');
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
+
+  // Friends: refresh from the backend every time the session user resolves.
+  useEffect(() => {
+    if (!user || !user.username) return;
+    // Wipe the stale localStorage friends pile from earlier builds — it is
+    // owned by the backend now.
+    try { localStorage.removeItem('kettle_friends'); } catch {}
+    refreshFriends();
+    refreshSuggested();
+    setOwnFriendCode(user.friend_code || '');
+  }, [user, refreshFriends, refreshSuggested]);
 
   useEffect(() => {
     if (currentPage === prevPageRef.current) return;
@@ -445,9 +598,89 @@ function App() {
     e.preventDefault();
     const n = nameDraft.trim().slice(0, 24);
     if (!n) return;
+    try { localStorage.setItem('kettle_auth_mode', 'guest'); } catch {}
     localStorage.setItem('kettle_name', n);
     setDisplayName(n);
     setShowNamePrompt(false); // kicks off the silent guest session below
+  };
+
+  // --- Google Sign-In --------------------------------------------------
+  // Opens the OAuth prompt in the system browser; bundled backend handles
+  // the callback under 127.0.0.1:8000. On completion we hydrate the user
+  // and treat the device as Google-linked. kettle_auth_mode='google' tells
+  // the silent guest session above to stay off.
+  const pollGoogleAuth = (sessionId, attempt = 0) => {
+    const MAX_ATTEMPTS = 60; // ~90s window
+    const tick = async (i) => {
+      if (i > MAX_ATTEMPTS) {
+        setGoogleAuthError('Timed out waiting for Google. Please try again.');
+        setIsGoogleSigning(false);
+        try { localStorage.removeItem('kettle_google_pending'); } catch {}
+        return;
+      }
+      try {
+        const { data } = await axios.get(`${AUTH_API}/auth/google/poll/${sessionId}`);
+        if (data?.status === 'complete' && data.access_token) {
+          try {
+            localStorage.setItem('token', data.access_token);
+            localStorage.setItem('kettle_auth_mode', 'google');
+            if (data.username) {
+              localStorage.setItem('kettle_name', data.username);
+              setDisplayName(data.username);
+            }
+            localStorage.removeItem('kettle_google_pending');
+          } catch {}
+          // Pre-hydrate from /users/me so the rest of the UI unlocks immediately
+          try {
+            const me = await axios.get(`${AUTH_API}/users/me`, { headers: { Authorization: `Bearer ${data.access_token}` } });
+            setUser(me.data);
+          } catch {
+            setUser({ username: data.username }); // good enough until next restart
+          }
+          setIsGoogleSigning(false);
+          setShowNamePrompt(false);
+          return;
+        }
+      } catch { /* still pending */ }
+      setTimeout(() => tick(i + 1), 1500);
+    };
+    tick(attempt);
+  };
+
+  const signInWithGoogle = async () => {
+    setGoogleAuthError('');
+    setIsGoogleSigning(true);
+    try {
+      const { data } = await axios.get(`${AUTH_API}/auth/google/start`);
+      if (!data?.url || !data?.session_id) throw new Error('No sign-in URL returned');
+      try { localStorage.setItem('kettle_google_pending', data.session_id); } catch {}
+      try { window.open(data.url, '_blank', 'popup,width=520,height=640')?.focus?.(); } catch { /* popup blocked — user can still click link */ }
+      pollGoogleAuth(data.session_id);
+    } catch {
+      setGoogleAuthError('Google sign-in is unavailable right now. Try the guest name instead.');
+      setIsGoogleSigning(false);
+    }
+  };
+
+  // Clear the local session and return to the login gate. Used by the
+  // Account panel's "Sign out" action.
+  const signOut = () => {
+    try {
+      ['token', 'kettle_guest', 'kettle_name', 'kettle_auth_mode', 'kettle_google_pending', 'kettle_recent', 'kettle_friends']
+        .forEach(k => localStorage.removeItem(k));
+    } catch {}
+    // Wipe every session-scoped taste cache so a different account on this
+    // device never inherits the previous one's shelves
+    setUser(null);
+    setDisplayName('');
+    setListenHistory([]);
+    setSearchHistory([]);
+    setTasteLoaded(false);
+    setRecentTracks([]);
+    setQueue([]);
+    setLikedSongs(new Set());
+    setHomeResults([]);
+    setShowNamePrompt(true);
   };
 
   // --- Silent guest session (NO login UI, ever) ------------------------
@@ -456,6 +689,7 @@ function App() {
   // Everything after that is automatic: the app is simply usable without
   // logging in. Runs only once a display name exists.
   useEffect(() => {
+    if (localStorage.getItem('kettle_auth_mode') === 'google') return; // Google sign-in drives its own session
     if (!displayName) return; // waiting on the first-launch name gate
     let cancelled = false;
 
@@ -631,7 +865,7 @@ function App() {
       setIsHomeLoading(true);
 
       // Both requests fire at once — home renders as soon as the slower one lands
-      const searchTask = axios.get(`${API_BASE}/search?q=latest+trending+music+hits`)
+      const searchTask = axios.get(`${LOCAL_API}/search?q=latest+trending+music+hits`)
         .then(res => { setHomeResults(res.data.results); })
         .catch(e => console.error("Trending search failed", e));
 
@@ -680,10 +914,10 @@ function App() {
       try {
         if (spec.recommend) {
           // Backend radio-mix: true vibe matching off one track
-          const r = await axios.get(`${API_BASE}/recommendations`, { params: spec.recommend });
+          const r = await axios.get(`${LOCAL_API}/recommendations`, { params: spec.recommend });
           return { ...spec, tracks: (r.data.results || []).slice(0, 12) };
         }
-        const r = await axios.get(`${API_BASE}/search?q=${encodeURIComponent(spec.query)}`);
+        const r = await axios.get(`${LOCAL_API}/search?q=${encodeURIComponent(spec.query)}`);
         return { ...spec, tracks: (r.data.results || []).slice(0, 12) };
       } catch { return { ...spec, tracks: [] }; }
     })).then(shelves => {
@@ -711,7 +945,8 @@ function App() {
       const res = await axios.put(`${API_BASE}/users/profile`, {
         username: editUsername || user.username,
         email: editEmail || user.email,
-        profile_photo: photoUrl || user.profile_photo
+        profile_photo: photoUrl || user.profile_photo,
+        bio: editBio || '',
       }, { headers: { Authorization: `Bearer ${token}` } });
 
       setUser(prev => ({ ...prev, ...res.data }));
@@ -763,6 +998,7 @@ function App() {
   const startEditing = () => {
     setEditUsername(user.username);
     setEditEmail(user.email || "");
+    setEditBio(user.bio || "");
     setIsEditingProfile(true);
   };
 
@@ -777,7 +1013,7 @@ function App() {
       const reqId = ++searchReqIdRef.current; // identify THIS request
       searchTimerRef.current = setTimeout(async () => {
         try {
-          const res = await axios.get(`${API_BASE}/search?q=${encodeURIComponent(val)}`);
+          const res = await axios.get(`${LOCAL_API}/search?q=${encodeURIComponent(val)}`);
           // Only the newest request may write results/loading state
           if (reqId !== searchReqIdRef.current) return;
           setResults(res.data.results);
@@ -822,7 +1058,7 @@ function App() {
     try {
       if (p.query) {
         setIsLoading(true);
-        const res = await axios.get(`${API_BASE}/search?q=${encodeURIComponent(p.query)}`);
+        const res = await axios.get(`${LOCAL_API}/search?q=${encodeURIComponent(p.query)}`);
         setCurrentPlaylist({ ...p, songs: res.data.results });
       } else {
         const res = await axios.get(`${API_BASE}/playlists/${p.id}`);
@@ -1045,39 +1281,97 @@ function App() {
           </div>
         </div>
 
-        <div className="library-section" style={{ marginTop: '24px' }}>
+        <div className="library-section friends-section" style={{ marginTop: '24px' }}>
           <div className="library-header">
-            <span><User size={22} /> Friends</span>
-            <UserPlus size={20} className="ctrl-icon" onClick={() => setIsAddingFriend(!isAddingFriend)} />
+            <span><User size={22} /> Friends{friends.length > 0 && <span className="friends-count">{friends.length}</span>}</span>
+            <UserPlus size={20} className="ctrl-icon" onClick={() => setIsAddingFriend(!isAddingFriend)} aria-label="Add a friend" />
           </div>
-          <div className="jam-section-body">
+          <div className="jam-section-body friends-body">
+            {ownFriendCode && (
+              <button className="friend-code-card" onClick={copyFriendCode} title="Copy your friend code">
+                <div className="friend-code-card-label">Your friend code</div>
+                <div className="friend-code-value">{ownFriendCode}</div>
+                <div className="friend-code-hint">{copiedFriendCode ? 'Copied!' : 'Tap to copy'}</div>
+              </button>
+            )}
+
             {isAddingFriend && (
-              <div className="jam-join-box" style={{ marginBottom: '16px' }}>
+              <form className="jam-join-box friends-join-box" onSubmit={submitFriendRequest}>
                 <input
                   type="text"
-                  placeholder="Username..."
-                  value={newFriendName}
-                  onChange={e => setNewFriendName(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleAddFriend()}
+                  placeholder="KT-XXXXXX or username"
+                  value={newFriendCodeDraft}
+                  onChange={e => setNewFriendCodeDraft(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 10))}
+                  autoFocus
                 />
-                <button className="join-btn-mini" onClick={handleAddFriend}>Add</button>
+                <button type="submit" className="join-btn-mini" disabled={!newFriendCodeDraft}>Send</button>
+              </form>
+            )}
+
+            {friendRequests.length > 0 && (
+              <div className="friend-requests-block">
+                <div className="friend-requests-label">{friendRequests.length} pending</div>
+                {friendRequests.map(req => (
+                  <div key={req.friendship_id} className="friend-row friend-request-row">
+                    <InitialsAvatar username={req.username} photo={req.profile_photo} size={32} online={req.is_online} />
+                    <div className="friend-meta">
+                      <div className="friend-name">{req.username}</div>
+                      {req.message && <div className="friend-msg">"{req.message}"</div>}
+                    </div>
+                    <div className="friend-actions">
+                      <button onClick={() => respondToFriendRequest(req.friendship_id, 'accept')} aria-label="Accept"><Check size={14} /></button>
+                      <button onClick={() => respondToFriendRequest(req.friendship_id, 'decline')} aria-label="Decline"><X size={14} /></button>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {friends.map((friend, i) => (
-                <div key={i} className="friend-row" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '4px 8px', borderRadius: '8px', transition: '0.2s' }}>
-                  <div style={{ position: 'relative' }}>
-                    <img src={`https://i.pravatar.cc/150?u=${friend.username}`} style={{ width: '32px', height: '32px', borderRadius: '50%' }} alt="" />
-                    <div style={{ position: 'absolute', bottom: '-2px', right: '-2px', width: '10px', height: '10px', borderRadius: '50%', background: friend.isOnline ? '#1db954' : '#555', border: '2px solid #000' }} />
+
+            <div className="friends-list">
+              {friends.map(friend => (
+                <div key={friend.friendship_id} className="friend-row">
+                  <InitialsAvatar username={friend.username} photo={friend.profile_photo} size={32} online={friend.is_online} />
+                  <div className="friend-meta">
+                    <div className="friend-name">{friend.username}</div>
+                    <div className="friend-status">{friend.is_online ? 'Online now' : 'last seen ' + relativeTime(friend.last_seen)}</div>
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    <span style={{ fontSize: '13px', color: 'var(--text)', fontWeight: friend.isOnline ? '700' : '500', opacity: friend.isOnline ? 1 : 0.6 }}>{friend.username}</span>
-                    <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>{friend.isOnline ? 'Online' : 'Offline'}</span>
-                  </div>
+                  <button className="friend-remove-btn" onClick={() => removeFriend(friend.friendship_id)} aria-label="Remove friend">
+                    <X size={14} />
+                  </button>
                 </div>
               ))}
-              {friends.length === 0 && <span style={{ fontSize: '12px', color: 'var(--text-dim)' }}>No friends added yet.</span>}
+              {friends.length === 0 && friendRequests.length === 0 && !ownFriendCode && (
+                <div className="friend-code-pending">
+                  <p>Friend sync needs a quick sign-in</p>
+                  <button className="friend-code-google-btn" onClick={signInWithGoogle}>
+                    <GoogleIcon size={18} /> Sign in with Google
+                  </button>
+                </div>
+              )}
+              {friends.length === 0 && friendRequests.length === 0 && ownFriendCode && (
+                <span style={{ fontSize: '12px', color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                  No friends yet. Share your code <strong style={{ color: 'var(--text)' }}>{ownFriendCode}</strong> — or paste <strong style={{ color: 'var(--text)' }}>somebody's</strong> code above to add them.
+                </span>
+              )}
             </div>
+
+            {suggestedFriends.length > 0 && (
+              <div className="suggested-friends-block">
+                <div className="friend-requests-label">People you might know</div>
+                {suggestedFriends.slice(0, 4).map(u => (
+                  <div key={u.id} className="friend-row">
+                    <InitialsAvatar username={u.username} photo={u.profile_photo} size={32} online={u.is_online} />
+                    <div className="friend-meta">
+                      <div className="friend-name">{u.username}</div>
+                      <div className="friend-status">Suggested</div>
+                    </div>
+                    <button className="friend-add-btn" onClick={() => sendFriendRequestFor(u.friend_code)} aria-label="Add friend">
+                      <UserPlus size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1501,7 +1795,7 @@ function App() {
                 {showVideo && !isFullPlayer ? (
                   <video
                     ref={el => { videoRef.current = el; if (el) el.muted = true; }}
-                    src={`${API_BASE}/stream-video/${currentTrack.id}`}
+                    src={`${LOCAL_API}/stream-video/${currentTrack.id}`}
                     poster={currentTrack.thumbnail}
                     muted
                     playsInline
@@ -1642,6 +1936,13 @@ function App() {
                         placeholder="Email"
                         className="edit-input"
                       />
+                      <textarea
+                        value={editBio}
+                        onChange={e => setEditBio(e.target.value.slice(0, 160))}
+                        placeholder="Bio — one line about you (optional)"
+                        className="edit-input"
+                        rows={2}
+                      />
                       <div className="profile-edit-actions">
                         <button className="btn-save" onClick={handleSaveProfile}>Save</button>
                         <button className="btn-cancel-small" onClick={() => setIsEditingProfile(false)}>Cancel</button>
@@ -1650,9 +1951,19 @@ function App() {
                   ) : (
                     <>
                       <h1>{displayName || user.username}</h1>
-                      <p>{user.username !== displayName ? `@${user.username} · ` : ''}{user.email || 'user@kettle.io'}</p>
-                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <p>{user.username !== displayName ? `@${user.username} · ` : ''}{user.email || user.friend_code || '—'}</p>
+                      {user.friend_code && (
+                        <button className="friend-code-pill" onClick={copyFriendCode} title="Copy your friend code">
+                          <span className="friend-code-pill-label">Your code</span>
+                          <span className="friend-code-pill-value">{user.friend_code}</span>
+                          <span className="friend-code-pill-copy">{copiedFriendCode ? 'Copied!' : 'Copy'}</span>
+                        </button>
+                      )}
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: 10 }}>
                         <span className="profile-badge">Free Member</span>
+                        <span className="profile-badge" style={{ opacity: 0.7 }}>
+                          {(user.friend_count || 0) === 1 ? '1 friend' : `${user.friend_count || 0} friends`}
+                        </span>
                         <button className="edit-profile-btn" onClick={startEditing}>Edit Profile</button>
                       </div>
                     </>
@@ -1758,7 +2069,21 @@ function App() {
               </div>
 
               <div className="account-footer">
-                <p className="version-tag">Kettle v1.1.0 • No login required</p>
+                {localStorage.getItem('kettle_auth_mode') === 'google' ? (
+                  <button className="account-footer-btn" onClick={signOut}>
+                    <GoogleIcon size={16} strokeWidth={2} /> Switch account
+                  </button>
+                ) : (
+                  <>
+                    <button className="account-footer-btn primary" onClick={signInWithGoogle}>
+                      <GoogleIcon size={16} strokeWidth={2} /> Sign in with Google
+                    </button>
+                    <button className="account-footer-btn" onClick={signOut}>
+                      Switch guest name
+                    </button>
+                  </>
+                )}
+                <p className="version-tag">Kettle v1.1.0</p>
               </div>
             </motion.div>
           </motion.div>
@@ -1983,7 +2308,7 @@ function App() {
               <video
                 ref={el => { videoRef.current = el; if (el) el.muted = true; }}
                 className="fp-video"
-                src={`${API_BASE}/stream-video/${currentTrack.id}`}
+                src={`${LOCAL_API}/stream-video/${currentTrack.id}`}
                 poster={currentTrack.thumbnail}
                 muted
                 playsInline
@@ -2125,8 +2450,7 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* NAME GATE — first launch only: what should we call you?
-          No account, no password — one field, then straight into the app. */}
+      {/* LOGIN GATE — pick a name (guest, no account) or sign in with Google */}
       <AnimatePresence>
         {showNamePrompt && (
           <motion.div
@@ -2136,28 +2460,54 @@ function App() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.4 }}
           >
-            <motion.form
+            <motion.div
               className="name-card"
-              onSubmit={submitName}
               initial={{ opacity: 0, y: 16 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.15, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
             >
               <img src={logoMark} alt="" className="name-logo" />
-              <h2>What should we call you?</h2>
-              <p>We'll set up your library as <strong>{nameDraft.trim() || '…'}</strong> — no account needed.</p>
-              <input
-                autoFocus
-                value={nameDraft}
-                onChange={e => setNameDraft(e.target.value)}
-                placeholder="Your name"
-                maxLength={24}
-                aria-label="Your name"
-              />
-              <button type="submit" disabled={!nameDraft.trim()}>
-                Start listening
+              <h2>Welcome to Kettle</h2>
+              <p>Jump straight in as a guest, or sign in to sync your library across devices.</p>
+
+              <button
+                className="google-btn"
+                onClick={signInWithGoogle}
+                disabled={isGoogleSigning}
+                aria-busy={isGoogleSigning}
+              >
+                {isGoogleSigning ? (
+                  <span className="google-spinner" aria-hidden="true" />
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+                    <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z" />
+                    <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z" />
+                    <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.519-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z" />
+                    <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z" />
+                  </svg>
+                )}
+                <span>{isGoogleSigning ? 'Waiting for Google…' : 'Continue with Google'}</span>
               </button>
-            </motion.form>
+              {googleAuthError && <p className="google-error" role="alert">{googleAuthError}</p>}
+
+              <div className="or-divider"><span>or</span></div>
+
+              <form onSubmit={submitName}>
+                <input
+                  autoFocus
+                  value={nameDraft}
+                  onChange={e => setNameDraft(e.target.value)}
+                  placeholder="Your name"
+                  maxLength={24}
+                  aria-label="Your name"
+                  disabled={isGoogleSigning}
+                />
+                <button type="submit" disabled={!nameDraft.trim() || isGoogleSigning}>
+                  Start listening
+                </button>
+              </form>
+              <p className="fineprint">Guests keep everything on this device. Google ties it to your account so every app session syncs.</p>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

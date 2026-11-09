@@ -44,8 +44,34 @@ async_session = sessionmaker(
 
 async def init_db():
     async with engine.begin() as conn:
-        # await conn.run_sync(Base.metadata.drop_all) # Only for dev
+        # Create any brand-new tables
         await conn.run_sync(Base.metadata.create_all)
+        # Idempotent migrations for columns added later — silent skips if
+        # they already exist (SQLite / Postgres both error on duplicates).
+        for stmt in [
+            "ALTER TABLE users ADD COLUMN friend_code VARCHAR",
+            "ALTER TABLE users ADD COLUMN bio VARCHAR DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN last_seen TIMESTAMP DEFAULT NULL",
+        ]:
+            try:
+                await conn.exec_driver_sql(stmt)
+            except Exception:
+                pass
+        # Backfill last_seen for rows that predate the migration
+        try:
+            await conn.exec_driver_sql(
+                "UPDATE users SET last_seen = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE last_seen IS NULL"
+            )
+        except Exception:
+            pass
+        # Older SQLite schemas need the index added separately (SQLite does
+        # not allow UNIQUE on ALTER ADD COLUMN). IF NOT EXISTS keeps it safe.
+        try:
+            await conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_friend_code ON users(friend_code)"
+            )
+        except Exception:
+            pass
 
 async def get_db():
     async with async_session() as session:

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE, WS_BASE } from '../config';
+import { API_BASE, LOCAL_API, WS_BASE } from '../config';
 
 const MusicContext = createContext();
 
@@ -18,11 +18,7 @@ export const MusicProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [likedSongs, setLikedSongs] = useState(new Set());
   const [showQueue, setShowQueue] = useState(false);
-  const [recentTracks, setRecentTracks] = useState(() => {
-    // Survive restarts so "Continue Listening" always has data
-    try { return JSON.parse(localStorage.getItem('kettle_recent')) || []; }
-    catch { return []; }
-  });
+  const [recentTracks, setRecentTracks] = useState([]);
   
   // Room (Jam) State
   const [currentRoom, setCurrentRoom] = useState(null);
@@ -51,12 +47,29 @@ export const MusicProvider = ({ children }) => {
   useEffect(() => { repeatRef.current = repeat; }, [repeat]);
   useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
 
-  // Persist play history for the Continue Listening list (localStorage copy;
-  // the backend /users/listen copy is fetched on launch for cross-session use)
+  // "Continue Listening" is DB-backed: /users/listen-history is the only
+  // source of truth. No localStorage copy — the backend is the record.
   useEffect(() => {
-    try { localStorage.setItem('kettle_recent', JSON.stringify(recentTracks.slice(0, 20))); }
-    catch { /* quota/corruption must never break playback */ }
-  }, [recentTracks]);
+    if (!user) return;
+    // Live plays since app start outrank the DB snapshot — merge, don't clobber
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/users/listen-history?limit=20`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (cancelled || !data || !Array.isArray(data.tracks)) return;
+        setRecentTracks(prev => {
+          if (prev.length === 0) return data.tracks;
+          const seen = new Set(prev.map(t => t.id));
+          return [...prev, ...data.tracks.filter(t => !seen.has(t.id))].slice(0, 20);
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [user]);
 
   const broadcastRoomState = useCallback((type, data) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -129,7 +142,7 @@ export const MusicProvider = ({ children }) => {
           // Set progress but don't auto-play to avoid browser blocks
           const audio = audioRef.current;
           const resumeAt = state.progress || 0;
-          audio.src = `${API_BASE}/stream/${track.id}?title=${encodeURIComponent(track.title || '')}`;
+          audio.src = `${LOCAL_API}/stream/${track.id}?title=${encodeURIComponent(track.title || '')}`;
           setProgress(resumeAt);
           // Seeking before metadata is loaded is dropped by the browser —
           // wait for loadedmetadata, but only once
@@ -190,7 +203,7 @@ export const MusicProvider = ({ children }) => {
     if (!track) return;
     try {
       const res = await fetch(
-        `${API_BASE}/recommendations?title=${encodeURIComponent(track.title)}&channel=${encodeURIComponent(track.channel || '')}&current_id=${track.id}`
+        `${LOCAL_API}/recommendations?title=${encodeURIComponent(track.title)}&channel=${encodeURIComponent(track.channel || '')}&current_id=${track.id}`
       );
       const data = await res.json();
       if (data.results?.length > 0) {
@@ -199,7 +212,7 @@ export const MusicProvider = ({ children }) => {
         const pick = pool[Math.floor(Math.random() * Math.min(5, pool.length))];
         upNextRef.current = { forId: track.id, pick, pool };
         // Warm the backend's stream-URL cache for the pick
-        fetch(`${API_BASE}/prefetch/${pick.id}`).catch(() => {});
+        fetch(`${LOCAL_API}/prefetch/${pick.id}`).catch(() => {});
       }
     } catch (e) {
       // Best-effort: handleNextTrack re-fetches on demand if this failed
@@ -219,7 +232,7 @@ export const MusicProvider = ({ children }) => {
       // Warm the NEXT queued track so the queue advances instantly
       const idx = queueList.findIndex(t => t.id === track.id);
       const nextUp = idx >= 0 ? (queueList[idx + 1] || (repeatRef.current === 'all' ? queueList[0] : null)) : null;
-      if (nextUp && nextUp.id !== track.id) fetch(`${API_BASE}/prefetch/${nextUp.id}`).catch(() => {});
+      if (nextUp && nextUp.id !== track.id) fetch(`${LOCAL_API}/prefetch/${nextUp.id}`).catch(() => {});
     }
 
     // Add to recent list
@@ -248,7 +261,7 @@ export const MusicProvider = ({ children }) => {
       }).catch(() => {});
     }
 
-    const streamUrl = `${API_BASE}/stream-live/${track.id}`;
+    const streamUrl = `${LOCAL_API}/stream-live/${track.id}`;
     const audio = audioRef.current;
 
     const onPlayStart = () => {
@@ -268,7 +281,7 @@ export const MusicProvider = ({ children }) => {
       if (!fromRemote && !isSyncingRef.current) broadcastRoomState('SYNC_PLAY', { track, progress: audio.currentTime, sentAt: Date.now() });
     } catch (err) {
       console.warn("Live stream failed, trying fallback...", err);
-      audio.src = `${API_BASE}/stream/${track.id}?title=${encodeURIComponent(track.title)}`;
+      audio.src = `${LOCAL_API}/stream/${track.id}?title=${encodeURIComponent(track.title)}`;
       if (startTime > 0) audio.currentTime = startTime; // re-apply seek lost by the src switch
       try {
         await audio.play();
@@ -335,7 +348,7 @@ export const MusicProvider = ({ children }) => {
     // Fallback: fetch recommendations now based on current song's vibe
     try {
       const res = await fetch(
-        `${API_BASE}/recommendations?title=${encodeURIComponent(ct.title)}&channel=${encodeURIComponent(ct.channel)}&current_id=${ct.id}`
+        `${LOCAL_API}/recommendations?title=${encodeURIComponent(ct.title)}&channel=${encodeURIComponent(ct.channel)}&current_id=${ct.id}`
       );
       const data = await res.json();
       if (data.results?.length > 0) {
