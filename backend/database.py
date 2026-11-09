@@ -44,8 +44,33 @@ async_session = sessionmaker(
 
 async def init_db():
     async with engine.begin() as conn:
+        from models import SchemaMeta
         # Create any brand-new tables
         await conn.run_sync(Base.metadata.create_all)
+        # One-shot factory reset — wipe all user-generated data exactly once.
+        # Marker row prevents re-wiping on every subsequent boot/deploy.
+        marker = (await conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM schema_meta WHERE key = 'factory_reset_done'"
+        )).scalar() or 0
+        if marker == 0:
+            for stmt in [
+                "DELETE FROM playlist_songs",
+                "DELETE FROM playlists",
+                "DELETE FROM playlist_songs",  # m2m may be repopulated above by join
+                "DELETE FROM liked_songs",
+                "DELETE FROM listen_history",
+                "DELETE FROM search_history",
+                "DELETE FROM friendships",
+                "DELETE FROM room_participants",
+                "DELETE FROM rooms",
+                "DELETE FROM songs",
+                "DELETE FROM users",
+            ]:
+                await conn.exec_driver_sql(stmt)
+            await conn.exec_driver_sql(
+                "INSERT INTO schema_meta (key, value) VALUES ('factory_reset_done', 'true')"
+            )
+            print('[factory-reset] wiped all user data')
         # Idempotent migrations for columns/indexes added later — silent skips if
         # they already exist (SQLite / Postgres both error on duplicates).
         for stmt in [

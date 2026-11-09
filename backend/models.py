@@ -162,3 +162,8 @@ class SearchHistory(Base):
     searched_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User")
+
+class SchemaMeta(Base):
+    __tablename__ = "schema_meta"
+    key = Column(String, primary_key=True)
+    value = Column(String)
