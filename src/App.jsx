@@ -605,15 +605,16 @@ function App() {
   };
 
   // --- Google Sign-In --------------------------------------------------
-  // Opens the OAuth prompt in the system browser; bundled backend handles
-  // the callback under 127.0.0.1:8000. On completion we hydrate the user
-  // and treat the device as Google-linked. kettle_auth_mode='google' tells
-  // the silent guest session above to stay off.
+  // Opens the OAuth prompt in the system browser; the shared cloud backend
+  // handles the callback (AUTH_API = the cloud by default — see config.js).
+  // kettle_auth_mode='google' tells the silent guest session below to stay off.
   const pollGoogleAuth = (sessionId, attempt = 0) => {
     const MAX_ATTEMPTS = 60; // ~90s window
     const tick = async (i) => {
       if (i > MAX_ATTEMPTS) {
-        setGoogleAuthError('Timed out waiting for Google. Please try again.');
+        const hasSession = !!localStorage.getItem('token');
+        const msg = 'Timed out waiting for Google. Please try again.';
+        if (hasSession) alert(msg); else setGoogleAuthError(msg);
         setIsGoogleSigning(false);
         try { localStorage.removeItem('kettle_google_pending'); } catch {}
         return;
@@ -657,7 +658,11 @@ function App() {
       try { window.open(data.url, '_blank', 'popup,width=520,height=640')?.focus?.(); } catch { /* popup blocked — user can still click link */ }
       pollGoogleAuth(data.session_id);
     } catch {
-      setGoogleAuthError('Google sign-in is unavailable right now. Try the guest name instead.');
+      const hasSession = !!localStorage.getItem('token');
+      const msg = hasSession
+        ? "Google sign-in is unavailable right now. Your name account stays fully usable. Enable Google sign-in in Render (see .env.production) — or ask for details."
+        : 'Google sign-in is unavailable right now. Try the guest name instead.';
+      if (hasSession) alert(msg); else setGoogleAuthError(msg);
       setIsGoogleSigning(false);
     }
   };
