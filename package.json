@@ -46,7 +46,10 @@
       "allowToChangeInstallationDirectory": true,
       "installerIcon": "icon.ico",
       "uninstallerIcon": "icon.ico",
-      "shortcutName": "Kettle"
+      "shortcutName": "Kettle",
+      "installerSidebar": "wizardSidebar.bmp",
+      "installerHeader": "wizardHeader.bmp",
+      "include": "installer.nsh"
     },
     "publish": [
       {

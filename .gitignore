@@ -14,7 +14,10 @@ dist-ssr
 .env
 
 # Build and Release
-build/
+build/*
+!build/installer.nsh
+!build/wizardSidebar.bmp
+!build/wizardHeader.bmp
 build_release/
 out/
 release/
@@ -46,3 +49,4 @@ venv/
 *.njsproj
 *.sln
 *.sw?
+backend/build/
