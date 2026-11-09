@@ -4,6 +4,11 @@ const fs = require('fs');
 const { spawn, exec } = require('child_process');
 const net = require('net');
 
+// Windows taskbar identity: must match package.json build.appId, or the
+// taskbar shows Electron's default icon/grouping instead of Kettle's.
+// (Electron 41 casing: setAppUserModelId — lowercase "d")
+app.setAppUserModelId('com.kettle.music');
+
 const isDev = !app.isPackaged;
 // Temporary placeholder for autoUpdater logic to avoid crashes
 const autoUpdater = {

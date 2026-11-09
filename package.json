@@ -42,8 +42,7 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "icon.ico",
-      "signAndEditExecutable": false
+      "icon": "icon.ico"
     },
     "forceCodeSigning": false,
     "nsis": {
