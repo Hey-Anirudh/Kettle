@@ -59,6 +59,16 @@ class MusicEngine:
         self._key_locks: Dict[str, asyncio.Lock] = {}
 
     @staticmethod
+    def _is_live_entry(item) -> bool:
+        """True for ongoing live streams (e.g. 24/7 radios) — this engine cannot
+        relay them (they 404 on extraction), so they must never appear in
+        search/recommendation results where they would fail silently."""
+        try:
+            return (item.get('live_status') or '').lower() == 'is_live'
+        except Exception:
+            return False
+
+    @staticmethod
     def _fmt_duration(secs) -> str:
         try:
             s = int(float(secs))
@@ -95,6 +105,8 @@ class MusicEngine:
             for item in (info or {}).get('entries') or []:
                 if not item:
                     continue
+                if self._is_live_entry(item):
+                    continue  # 24/7 live streams cannot be relayed — skip them
                 vid = item.get('id') or ''
                 if not vid:
                     continue
@@ -149,6 +161,8 @@ class MusicEngine:
             for item in entries:
                 if not item:
                     continue
+                if self._is_live_entry(item):
+                    continue  # 24/7 live streams cannot be relayed — skip them
                 vid = item.get('id', '')
                 if vid == video_id:
                     continue  # Skip the current song

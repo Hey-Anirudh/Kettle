@@ -435,7 +435,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       const res = await axios.post(`${API_BASE}/friends/request`, payload, { headers: { Authorization: `Bearer ${token}` } });
       setNewFriendCodeDraft('');
       setIsAddingFriend(false);
-      await Promise.all([refreshFriends(), refreshSuggested()]);
+      await refreshFriends();
       if (res.data?.status === 'already_friends') {
         alert('You’re already friends with this person.');
       }
@@ -445,23 +445,13 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     }
   };
 
-  const sendFriendRequestFor = async (code) => {
-    const token = localStorage.getItem('token');
-    if (!token) return;
-    try {
-      await axios.post(`${API_BASE}/friends/request`, { friend_code: code }, { headers: { Authorization: `Bearer ${token}` } });
-      await Promise.all([refreshFriends(), refreshSuggested()]);
-    } catch (err) {
-      alert(err?.response?.data?.detail || 'Could not send friend request');
-    }
-  };
 
   const respondToFriendRequest = async (friendshipId, action) => {
     const token = localStorage.getItem('token');
     if (!token) return;
     try {
       await axios.post(`${API_BASE}/friends/respond/${friendshipId}`, { action }, { headers: { Authorization: `Bearer ${token}` } });
-      await Promise.all([refreshFriends(), refreshSuggested()]);
+      await refreshFriends();
     } catch (err) {
       alert(err?.response?.data?.detail || 'Could not update friend request');
     }
@@ -472,7 +462,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     if (!token) return;
     try {
       await axios.delete(`${API_BASE}/friends/${friendshipId}`, { headers: { Authorization: `Bearer ${token}` } });
-      await Promise.all([refreshFriends(), refreshSuggested()]);
+      await refreshFriends();
     } catch (err) {
       alert(err?.response?.data?.detail || 'Could not remove friend');
     }
@@ -530,9 +520,8 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     // owned by the backend now.
     try { localStorage.removeItem('kettle_friends'); } catch {}
     refreshFriends();
-    refreshSuggested();
     setOwnFriendCode(user.friend_code || '');
-  }, [user, refreshFriends, refreshSuggested]);
+  }, [user, refreshFriends]);
 
   useEffect(() => {
     if (currentPage === prevPageRef.current) return;
@@ -625,7 +614,6 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     setLikedSongs(new Set());
     setFriends([]);
     setFriendRequests([]);
-    setSuggestedFriends([]);
     setOwnFriendCode('');
     setHomeResults([]);
     setShowNamePrompt(true);
@@ -1329,23 +1317,6 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
               )}
             </div>
 
-            {suggestedFriends.length > 0 && (
-              <div className="suggested-friends-block">
-                <div className="friend-requests-label">People you might know</div>
-                {suggestedFriends.slice(0, 4).map(u => (
-                  <div key={u.id} className="friend-row">
-                    <InitialsAvatar username={u.username} photo={u.profile_photo} size={32} online={u.is_online} />
-                    <div className="friend-meta">
-                      <div className="friend-name">{u.username}</div>
-                      <div className="friend-status">Suggested</div>
-                    </div>
-                    <button className="friend-add-btn" onClick={() => sendFriendRequestFor(u.friend_code)} aria-label="Add friend">
-                      <UserPlus size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         </div>
 
@@ -2049,7 +2020,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
 
               <div className="account-footer">
                 <button className="account-footer-btn primary" onClick={signOut}>Switch name</button>
-                <p className="version-tag">Kettle v1.2.2</p>
+                <p className="version-tag">Kettle v1.2.3</p>
               </div>
             </motion.div>
           </motion.div>
