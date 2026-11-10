@@ -90,7 +90,7 @@ const TrackRow = memo(({ track, index, list, isActive, isPlaying, isLiked, onPla
 });
 
 // ============================================================================
-// TASTE ENGINE Ã¢â‚¬â€ turns an account's REAL signals (plays, likes, searches)
+// TASTE ENGINE — turns an account's REAL signals (plays, likes, searches)
 // into home-page shelves. Every user gets different shelves because these
 // inputs differ per account; brand-new accounts get time-of-day moods.
 // ============================================================================
@@ -163,7 +163,7 @@ function buildTasteShelves({ listenHistory, searchHistory, likedSongsList }) {
   if (anchor && anchor.id && anchor.title) {
     shelves.push({
       key: 'more-like',
-      title: `More like Ã¢â‚¬Å“${anchor.title.slice(0, 34)}Ã¢â‚¬Â`,
+      title: `More like \u201c${anchor.title.slice(0, 34)}\u201d`,
       sub: 'Radio-matched to what you play',
       recommend: { title: anchor.title, channel: anchor.channel || '', current_id: anchor.id }
     });
@@ -185,7 +185,7 @@ function buildTasteShelves({ listenHistory, searchHistory, likedSongsList }) {
   if (tops[0]) {
     shelves.push({
       key: 'your-search',
-      title: `Because you searched Ã¢â‚¬Å“${tops[0].slice(0, 30)}Ã¢â‚¬Â`,
+      title: `Because you searched \u201c${tops[0].slice(0, 30)}\u201d`,
       sub: 'Fresh picks from your history',
       query: tops[0]
     });
@@ -203,13 +203,13 @@ function buildTasteShelves({ listenHistory, searchHistory, likedSongsList }) {
   if (shelves.length < 3 && tops[1]) {
     shelves.push({
       key: 'your-search-2',
-      title: `Also searched Ã¢â‚¬Å“${tops[1].slice(0, 30)}Ã¢â‚¬Â`,
+      title: `Also searched \u201c${tops[1].slice(0, 30)}\u201d`,
       sub: 'From your search history',
       query: tops[1]
     });
   }
 
-  // 5) Cold start Ã¢â‚¬â€ no signals yet: set the vibe by time of day instead
+  // 5) Cold start — no signals yet: set the vibe by time of day instead
   if (!shelves.length) {
     const h = new Date().getHours();
     const mood = h >= 6 && h < 12
@@ -226,7 +226,7 @@ function buildTasteShelves({ listenHistory, searchHistory, likedSongsList }) {
   return shelves.slice(0, 3);
 }
 
-// Time-of-day vibe for the hero Ã¢â‚¬â€ computed per render (cheap) so it
+// Time-of-day vibe for the hero — computed per render (cheap) so it
 // never shows yesterday's morning vibe after midnight
 const vibeForNow = () => {
   const h = new Date().getHours();
@@ -302,7 +302,7 @@ function App() {
     audioRef
   } = useMusic();
 
-  // Time-of-day vibe Ã¢â‚¬â€ recomputed per render, never stale
+  // Time-of-day vibe — recomputed per render, never stale
   const VIBE = vibeForNow();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -315,7 +315,7 @@ function App() {
   // Startup animation: show until the guest session resolves (min 1.9s, hard cap 6s)
   const [splashMinDone, setSplashMinDone] = useState(false);
   const [splashDone, setSplashDone] = useState(false);
-  // First-launch gate. No account is required Ã¢â‚¬â€ the silent name-based
+  // First-launch gate. No account is required — the silent name-based
   // session keeps the app fully usable. Every choice is a real cloud
   // account (sync, friends, Jam) owned by this device.
   const [displayName, setDisplayName] = useState(() => localStorage.getItem('kettle_name') || '');
@@ -357,18 +357,17 @@ function App() {
   const [fpCopied, setFpCopied] = useState(false);
   const [fpIdle, setFpIdle] = useState(false);
   
-  // Friends System Ã¢â‚¬â€ DB-connected. The bundle used to keep this in
+  // Friends System — DB-connected. The bundle used to keep this in
   // localStorage with fake isOnline. Now friend records, friend codes,
   // suggestions and incoming requests all hit /friends/*.
   const [friends, setFriends] = useState([]);
   const [friendRequests, setFriendRequests] = useState([]);
-  const [suggestedFriends, setSuggestedFriends] = useState([]);
   const [ownFriendCode, setOwnFriendCode] = useState('');
   const [isAddingFriend, setIsAddingFriend] = useState(false);
   const [newFriendCodeDraft, setNewFriendCodeDraft] = useState('');
   const [copiedFriendCode, setCopiedFriendCode] = useState(false);
 
-// Deterministic color + initials per username Ã¢â‚¬â€ avoids external HTTP
+// Deterministic color + initials per username — avoids external HTTP
 // dependency (i.pravatar.cc) for avatars
 const avatarColor = (name) => {
   let h = 2166136261 >>> 0;
@@ -422,14 +421,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     }
   }, []);
 
-  const refreshSuggested = useCallback(async () => {
-    const token = localStorage.getItem('token');
-    if (!token) return;
-    try {
-      const res = await axios.get(`${API_BASE}/suggested-friends`, { headers: { Authorization: `Bearer ${token}` } });
-      setSuggestedFriends(Array.isArray(res.data) ? res.data : []);
-    } catch {}
-  }, []);
+
 
   const submitFriendRequest = async (e) => {
     e?.preventDefault?.();
@@ -445,7 +437,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       setIsAddingFriend(false);
       await Promise.all([refreshFriends(), refreshSuggested()]);
       if (res.data?.status === 'already_friends') {
-        alert('YouÃ¢â‚¬â„¢re already friends with this person.');
+        alert('You’re already friends with this person.');
       }
     } catch (err) {
       const detail = err?.response?.data?.detail || 'Could not send friend request';
@@ -534,7 +526,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
   // Friends: refresh from the backend every time the session user resolves.
   useEffect(() => {
     if (!user || !user.username) return;
-    // Wipe the stale localStorage friends pile from earlier builds Ã¢â‚¬â€ it is
+    // Wipe the stale localStorage friends pile from earlier builds — it is
     // owned by the backend now.
     try { localStorage.removeItem('kettle_friends'); } catch {}
     refreshFriends();
@@ -577,7 +569,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
   useEffect(() => {
     if (splashMinDone && user) { const t = setTimeout(() => setSplashDone(true), 450); return () => clearTimeout(t); }
   }, [splashMinDone, user]);
-  // First launch: nobody has a name yet Ã¢â‚¬â€ hand off from splash to the name gate
+  // First launch: nobody has a name yet — hand off from splash to the name gate
   useEffect(() => {
     if (splashMinDone && !displayName) {
       const t = setTimeout(() => { setSplashDone(true); setShowNamePrompt(true); }, 450);
@@ -594,7 +586,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       const { data } = await axios.get(`${API_BASE}/users/me`, { headers: { Authorization: `Bearer ${token}` } });
       setUser(data);
     } catch {
-      alert('Friend sync is not live on the shared server yet Ã¢â‚¬â€ it ships with the next backend deploy.');
+      alert('Friend sync is not live on the shared server yet — it ships with the next backend deploy.');
     }
   };
 
@@ -617,7 +609,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       ['token', 'kettle_guest', 'kettle_name', 'kettle_auth_mode', 'kettle_recent', 'kettle_friends']
         .forEach(k => localStorage.removeItem(k));
     } catch {}
-    // Stop audio, drop the Jam room, wipe friend data from the screen Ã¢â‚¬â€
+    // Stop audio, drop the Jam room, wipe friend data from the screen —
     // a signed-out session must look completely clean.
     try { audioRef.current?.pause(); } catch {}
     leaveRoom();
@@ -641,11 +633,11 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
 
   // --- Silent guest session (NO login UI, ever) ------------------------
   // First launch asks for a name (the gate above), then creates a local
-  // account whose username is derived FROM that name Ã¢â‚¬â€ no guest_xxx.
+  // account whose username is derived FROM that name — no guest_xxx.
   // Everything after that is automatic: the app is simply usable without
   // logging in. Runs only once a display name exists.
   useEffect(() => {
-    // Normalize stale mode from before Google auth was removed Ã¢â‚¬â€ otherwise
+    // Normalize stale mode from before Google auth was removed — otherwise
     // this account would silently never sign in again
     try { if (localStorage.getItem('kettle_auth_mode') === 'google') localStorage.setItem('kettle_auth_mode', 'guest'); } catch {}
     if (!displayName) return; // waiting on the first-launch name gate
@@ -663,12 +655,12 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         } catch { localStorage.removeItem('token'); } // stale/rotated token
       }
 
-      // Reuse stored guest credentials Ã¢â‚¬â€ /register can only succeed once
+      // Reuse stored guest credentials — /register can only succeed once
       let creds = null;
       try { creds = JSON.parse(localStorage.getItem('kettle_guest')); } catch {}
       if (!creds || !creds.username) {
         const id = Math.random().toString(36).slice(2, 8) + Date.now().toString(36);
-        // Username derived from the name the user chose Ã¢â‚¬â€ human-readable,
+        // Username derived from the name the user chose — human-readable,
         // unique (suffix), and never the old guest_xxxxxxxxxxxx
         const slug = displayName.toLowerCase()
           .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 16) || 'listener';
@@ -694,7 +686,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
 
       if (cancelled) return;
       if (!access) {
-        // Backend not up yet Ã¢â‚¬â€ the splash covers the wait; retry a few times
+        // Backend not up yet — the splash covers the wait; retry a few times
         if (attempt < 12) setTimeout(() => { if (!cancelled) ensureGuestSession(attempt + 1); }, 1500);
         return;
       }
@@ -706,7 +698,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         });
         if (cancelled) return;
         setUser(me.data);
-        // Guests skip the onboarding modal Ã¢â‚¬â€ the homepage handles vibe selection
+        // Guests skip the onboarding modal — the homepage handles vibe selection
         if (!me.data.onboarding_completed) {
           axios.post(`${API_BASE}/users/onboarding`, { genres: [], artists: [] },
             { headers: { Authorization: `Bearer ${access}` } }).catch(() => {});
@@ -718,7 +710,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     return () => { cancelled = true; };
   }, [setUser, displayName]);
 
-  // Electron Update Listeners (removed on cleanup Ã¢â‚¬â€ StrictMode mounts twice)
+  // Electron Update Listeners (removed on cleanup — StrictMode mounts twice)
   useEffect(() => {
     if (!window.ipcRenderer) return;
     const onAvailable = () => setUpdateStatus('available');
@@ -734,7 +726,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
   // Clear any pending search timer on unmount
   useEffect(() => () => clearTimeout(searchTimerRef.current), []);
 
-  // VIDEO MODE Ã¢â‚¬â€ the <audio> element NEVER stops. A muted <video> element
+  // VIDEO MODE — the <audio> element NEVER stops. A muted <video> element
   // plays the relayed video stream phase-locked to the audio: a playbackRate
   // servo nudges the video faster or slower until drift is below the
   // 25 ms perception threshold, then it rides exactly alongside. Seeks and
@@ -749,7 +741,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     video.muted = true;
     video.playbackRate = 1;
 
-    const DEAD_ZONE = 0.012; // 12 ms Ã¢â‚¬â€ far below AV-sync perception
+    const DEAD_ZONE = 0.012; // 12 ms — far below AV-sync perception
     const HARD_SNAP = 0.8;   // user seeked / real network hiccup
 
     const tick = () => {
@@ -763,7 +755,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         return;
       }
       if (Math.abs(drift) <= DEAD_ZONE) {
-        // Locked Ã¢â‚¬â€ ride the clock exactly
+        // Locked — ride the clock exactly
         if (video.playbackRate !== 1) video.playbackRate = 1;
         return;
       }
@@ -773,7 +765,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
 
     const mirror = () => {
       if (!audio.paused && video.paused) {
-        // Restart Ã¢â‚¬â€ re-lock position first so a resume never shows old offset
+        // Restart — re-lock position first so a resume never shows old offset
         try { video.currentTime = audio.currentTime; } catch { /* pre-metadata */ }
         video.playbackRate = 1;
         video.play().catch(() => {});
@@ -822,7 +814,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     const fetchHomeData = async () => {
       setIsHomeLoading(true);
 
-      // Both requests fire at once Ã¢â‚¬â€ home renders as soon as the slower one lands
+      // Both requests fire at once — home renders as soon as the slower one lands
       const searchTask = axios.get(`${LOCAL_API}/search?q=latest+trending+music+hits`)
         .then(res => { setHomeResults(res.data.results); })
         .catch(e => console.error("Trending search failed", e));
@@ -837,7 +829,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     fetchHomeData();
   }, []);
 
-  // Load this account's REAL history (plays + searches) Ã¢â‚¬â€ the raw taste
+  // Load this account's REAL history (plays + searches) — the raw taste
   // signals that make the home page different for every single user.
   useEffect(() => {
     if (!user) return;
@@ -910,7 +902,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       setUser(prev => ({ ...prev, ...res.data }));
       setIsEditingProfile(false);
       if (editUsername && editUsername !== user.username) {
-        // JWT is issued for the old username Ã¢â‚¬â€ silently re-auth so the
+        // JWT is issued for the old username — silently re-auth so the
         // session keeps working (there is no login screen to fall back on)
         try {
           let creds = JSON.parse(localStorage.getItem('kettle_guest') || 'null');
@@ -923,7 +915,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
               ...creds, username: editUsername, email: editEmail || user.email
             }));
           }
-        } catch { /* keep old token Ã¢â‚¬â€ next launch re-registers a guest */ }
+        } catch { /* keep old token — next launch re-registers a guest */ }
       }
     } catch (e) {
       alert(e.response?.data?.detail || "Update failed");
@@ -1003,7 +995,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         headers: { Authorization: `Bearer ${token}` }
       });
       const songs = res.data.songs || [];
-      // Only update state when content actually changed Ã¢â‚¬â€ identity churn
+      // Only update state when content actually changed — identity churn
       // retriggers the taste-shelf builder for no reason every library open
       setLikedSongsList(prev => {
         if (prev.length === songs.length && prev.every((s, i) => s.id === songs[i].id)) return prev;
@@ -1125,7 +1117,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
   const displayProgress = isDragging ? dragProgress : progress;
   const progressPercent = duration > 0 ? (displayProgress / duration) * 100 : 0;
 
-  // VIDEO MODE Ã¢â‚¬â€ hold the screen hostage to the video: after 2.6 s without
+  // VIDEO MODE — hold the screen hostage to the video: after 2.6 s without
   // any pointer or key activity, every UI element fades away (like YouTube
   // / Apple TV immersive mode). ANY activity brings the controls back.
   useEffect(() => {
@@ -1233,7 +1225,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                     <Users size={14} color="var(--primary-accent)" />
                     <p className="jam-name">{currentRoom}</p>
                   </div>
-                  <span>{roomParticipants.length} listening Ã¢â‚¬Â¢ {isRoomHost ? 'Host' : 'Member'}</span>
+                  <span>{roomParticipants.length} listening \u2022 {isRoomHost ? 'Host' : 'Member'}</span>
                 </div>
                 <ChevronDown size={18} style={{ transform: 'rotate(-90deg)', color: 'var(--text-dim)' }} />
               </div>
@@ -1332,7 +1324,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
               )}
               {friends.length === 0 && friendRequests.length === 0 && ownFriendCode && (
                 <div className="friends-empty">
-                  No friends yet. Share your code <strong style={{ color: 'var(--text)' }}>{ownFriendCode}</strong> Ã¢â‚¬â€ or paste <strong style={{ color: 'var(--text)' }}>somebody's</strong> code above to add them.
+                  No friends yet. Share your code <strong style={{ color: 'var(--text)' }}>{ownFriendCode}</strong> — or paste <strong style={{ color: 'var(--text)' }}>somebody's</strong> code above to add them.
                 </div>
               )}
             </div>
@@ -1370,7 +1362,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
               </div>
               <div className="pl-item-info">
                 <p>Liked Songs</p>
-                <span>Playlist Ã¢â‚¬Â¢ {likedSongs.size} songs</span>
+                <span>Playlist \u2022 {likedSongs.size} songs</span>
               </div>
             </div>
 
@@ -1381,7 +1373,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                 </div>
                 <div className="pl-item-info">
                   <p>{p.name}</p>
-                  <span>Playlist Ã¢â‚¬Â¢ {displayName || user?.username}</span>
+                  <span>Playlist \u2022 {displayName || user?.username}</span>
                 </div>
               </div>
             ))}
@@ -1417,7 +1409,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                 <span className="username-text">{displayName || user.username}</span>
               </div>
             ) : (
-              // Session still warming up under the splash Ã¢â‚¬â€ no login, ever
+              // Session still warming up under the splash — no login, ever
               <div className="user-account-trigger ghost" aria-hidden="true" />
             )}
           </div>
@@ -1427,7 +1419,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
           <AnimatePresence mode="wait">
             {currentPage === 'home' && (
               <motion.div key="home" className="home-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
-                {/* 1. VIBE HERO Ã¢â‚¬â€ time-of-day gradient + mood chips: sets the tone */}
+                {/* 1. VIBE HERO — time-of-day gradient + mood chips: sets the tone */}
                 <div className={`vibe-hero ${VIBE.dark ? 'dark' : ''}`} style={{ background: VIBE.grad }}>
                   <div className="vibe-blobs" aria-hidden="true">
                     <span style={{ background: VIBE.blob1 }} />
@@ -1436,7 +1428,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   <div className="vibe-hero-content">
                     <p className="vibe-kicker">
                       {VIBE.greeting}{displayName ? `, ${displayName}` : ''}
-                      <span className="vibe-dot">Ã¢â‚¬Â¢</span>{VIBE.mood}
+                      <span className="vibe-dot">\u2022</span>{VIBE.mood}
                     </p>
                     <h1 className="vibe-title">{VIBE.headline}</h1>
                     <p className="vibe-line">{VIBE.line}</p>
@@ -1460,7 +1452,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   </div>
                 </div>
 
-                {/* 2. CONTINUE LISTENING Ã¢â‚¬â€ the user's real play history as a list */}
+                {/* 2. CONTINUE LISTENING — the user's real play history as a list */}
                 {continueList.length > 0 && (
                   <div className="home-section">
                     <div className="section-header">
@@ -1482,7 +1474,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   </div>
                 )}
 
-                {/* 3. MADE FOR YOU Ã¢â‚¬â€ different shelves for every single user,
+                {/* 3. MADE FOR YOU — different shelves for every single user,
                     built from that account's own plays, likes and searches */}
                 <div className="home-section">
                   <div className="section-header">
@@ -1518,7 +1510,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   )}
                 </div>
 
-                {/* 4. TRENDING Ã¢â‚¬â€ live YouTube results, the universal baseline */}
+                {/* 4. TRENDING — live YouTube results, the universal baseline */}
                 <div className="home-section">
                   <div className="section-header">
                     <h2><Flame size={22} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '8px', color: 'var(--primary-accent)' }} fill="currentColor" /> Trending Now</h2>
@@ -1542,7 +1534,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   )}
                 </div>
 
-                {/* 5. FEATURED PLAYLISTS Ã¢â‚¬â€ curated moods & artist radios */}
+                {/* 5. FEATURED PLAYLISTS — curated moods & artist radios */}
                 {featuredPlaylists.length > 0 && (
                   <div className="home-section">
                     <div className="section-header">
@@ -1563,7 +1555,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   </div>
                 )}
 
-                {/* 6. YOUR FAVORITES Ã¢â‚¬â€ liked songs as a quick list */}
+                {/* 6. YOUR FAVORITES — liked songs as a quick list */}
                 {likedSongsList.length > 0 && (
                   <div className="home-section">
                     <div className="section-header">
@@ -1635,7 +1627,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                           <h1>{currentRoom}</h1>
                           {roomStatus !== 'connected' && (
                             <span className="jam-status-pill jam-status-pill--warn" role="status" aria-live="polite">
-                              {roomStatus === 'connecting' ? 'Connecting to the roomâ€¦' : 'Connection lost â€” leave and rejoin'}
+                              {roomStatus === 'connecting' ? 'Connecting to the room\u2026' : 'Connection lost \u2014 leave and rejoin'}
                             </span>
                           )}
                         </div>
@@ -1820,7 +1812,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   <span className="show-all" onClick={() => setShowQueue(true)}>Open queue</span>
                 </div>
                 {(() => {
-                  // Show the track AFTER the current one Ã¢â‚¬â€ not blindly queue[1],
+                  // Show the track AFTER the current one — not blindly queue[1],
                   // which is often the currently-playing track itself
                   const ci = queue.findIndex(t => t?.id === currentTrack?.id);
                   const nextUp = ci >= 0 ? queue[ci + 1] : queue.find(t => t?.id !== currentTrack?.id);
@@ -1852,7 +1844,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                       <img src={f.img} style={{ width: '32px', height: '32px', borderRadius: '50%' }} alt="" />
                       <div style={{ flex: 1 }}>
                         <p style={{ fontSize: '13px', fontWeight: '700' }}>{f.name}</p>
-                        <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{f.track} Ã¢â‚¬Â¢ {f.time}</p>
+                        <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{f.track} \u2014 {f.time}</p>
                       </div>
                       <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#1db954' }} />
                     </div>
@@ -1926,7 +1918,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                       <textarea
                         value={editBio}
                         onChange={e => setEditBio(e.target.value.slice(0, 160))}
-                        placeholder="Bio Ã¢â‚¬â€ one line about you (optional)"
+                        placeholder="Bio — one line about you (optional)"
                         className="edit-input"
                         rows={2}
                       />
@@ -1938,7 +1930,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   ) : (
                     <>
                       <h1>{displayName || user.username}</h1>
-                      <p>{user.username !== displayName ? `@${user.username} Ã‚Â· ` : ''}{user.email || user.friend_code || 'Ã¢â‚¬â€'}</p>
+                      <p>{user.username !== displayName ? `@${user.username} \u00b7 ` : ''}{user.email || user.friend_code || '\u2014'}</p>
                       {user.friend_code && (
                         <button className="friend-code-pill" onClick={copyFriendCode} title="Copy your friend code">
                           <span className="friend-code-pill-label">Your code</span>
@@ -2057,7 +2049,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
 
               <div className="account-footer">
                 <button className="account-footer-btn primary" onClick={signOut}>Switch name</button>
-                <p className="version-tag">Kettle v1.2.1</p>
+                <p className="version-tag">Kettle v1.2.2</p>
               </div>
             </motion.div>
           </motion.div>
@@ -2264,7 +2256,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         </div>
       </footer>
 
-      {/* FULL-SCREEN PLAYER Ã¢â‚¬â€ immersive: full-bleed video when video mode is on,
+      {/* FULL-SCREEN PLAYER — immersive: full-bleed video when video mode is on,
            otherwise a cinematic blurred-art stage. Nothing else renders behind it. */}
       <AnimatePresence>
         {isFullPlayer && currentTrack && (
@@ -2297,7 +2289,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
             {/* Top bar */}
             <header className="fp-topbar">
               <button className="fp-icon-btn" onClick={() => setIsFullPlayer(false)} aria-label="Close player"><ChevronDown size={22} /></button>
-              <p className="fp-kicker">{showVideo ? 'Now Playing Ã¢â‚¬â€ Video' : 'Now Playing'}</p>
+              <p className="fp-kicker">{showVideo ? 'Now Playing — Video' : 'Now Playing'}</p>
               <div className="fp-top-actions">
                 <button className="fp-icon-btn" onClick={shareCurrent} aria-label={fpCopied ? 'Link copied' : 'Copy track link'}>
                   {fpCopied ? <Check size={18} /> : <Share2 size={18} />}
@@ -2382,7 +2374,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         )}
       </AnimatePresence>
 
-      {/* STARTUP ANIMATION Ã¢â‚¬â€ minimalist: logo, wordmark, thin progress */}
+      {/* STARTUP ANIMATION — minimalist: logo, wordmark, thin progress */}
       <AnimatePresence>
         {!splashDone && (
           <motion.div
@@ -2425,7 +2417,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         )}
       </AnimatePresence>
 
-      {/* LOGIN GATE Ã¢â‚¬â€ pick a name */}
+      {/* LOGIN GATE — pick a name */}
       <AnimatePresence>
         {showNamePrompt && (
           <motion.div
@@ -2443,7 +2435,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
             >
               <img src={logoMark} alt="" className="name-logo" />
               <h2>Welcome to Kettle</h2>
-              <p>Pick a name Ã¢â‚¬â€ your account syncs your library, friends and Jam sessions on every device.</p>
+              <p>Pick a name — your account syncs your library, friends and Jam sessions on every device.</p>
 
               <form onSubmit={submitName}>
                 <input
@@ -2458,7 +2450,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                   Start listening
                 </button>
               </form>
-              <p className="fineprint">No account required. Your name is all this app needs Ã¢â‚¬â€ you get a unique code and your taste syncs like magic.</p>
+              <p className="fineprint">No account required. Your name is all this app needs — you get a unique code and your taste syncs like magic.</p>
             </motion.div>
           </motion.div>
         )}
