@@ -1,0 +1,98 @@
+# Codemagic CI/CD — Kettle (iOS + Android)
+#
+# Prereqs (all free to set up on Codemagic, then paid Apple Developer Program for iOS signing):
+#   Android sideload APK  — no keys required (debug-signed APK builds out of the box)
+#   Android Play Store    — create an upload keystore, upload to Codemagic as
+#                           "kettle_upload_keystore" and set CM_KEYSTORE_* env vars,
+#                           and a Google Play service-account JSON for publishing
+#   iOS TestFlight/App Store — Apple Developer Program ($99/yr) + App Store Connect
+#                           API key (Issuer ID + Key ID + .p8) added to Codemagic as
+#                           an App Store Connect API key, plus bundle id com.kettle.music
+#
+# The app URL/backend is baked in via .env.production (VITE_API_BASE=https://kettle-backend.onrender.com),
+# so every build here talks to the same shared cloud as desktop.
+
+workflows:
+  android-sideload:
+    name: Android debug APK (sideload)
+    max_build_duration: 45
+    instance_type: mac_mini_m2
+    environment:
+      java: 21
+      node: 24
+    scripts:
+      - npm ci
+      - npx cap sync android
+      - cd android && ./gradlew assembleDebug --console=plain
+    artifacts:
+      - android/app/build/outputs/apk/debug/app-debug.apk
+    publishing:
+      email:
+        recipients:
+          - anirudh@example.com
+
+  android-release:
+    name: Android signed release AAB (Play Store)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      java: 21
+      node: 24
+      android_signing:
+        - kettle_upload_keystore
+      groups:
+        - play_console   # PLAY_JSON_KEY secret
+    scripts:
+      - npm ci
+      - npx cap sync android
+      - cd android
+      - |
+        ./gradlew bundleRelease --console=plain \
+          -Pandroid.injected.signing.store.file=$CM_KEYSTORE_PATH \
+          -Pandroid.injected.signing.store.password=$CM_KEYSTORE_PASSWORD \
+          -Pandroid.injected.signing.key.alias=$CM_KEY_ALIAS \
+          -Pandroid.injected.signing.key.password=$CM_KEY_PASSWORD
+    artifacts:
+      - android/app/build/outputs/bundle/release/*.aab
+    publishing:
+      google_play:
+        track: internal
+        credentials: $PLAY_JSON_KEY
+
+  ios-testflight:
+    name: iOS TestFlight build
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      node: 24
+      cocoapods: default
+      groups:
+        - app_store_connect   # CM_APP_STORE_CONNECT_PRIVATE_KEY, CM_APP_STORE_CONNECT_KEY_IDENTIFIER, CM_APP_STORE_CONNECT_ISSUER_ID
+      vars:
+        BUNDLE_ID: com.kettle.music
+    integrations:
+      app_store_connect: Kettle ASC key
+    scripts:
+      - npm ci
+      - npx cap sync ios
+      - cd ios/App
+      - |
+        xcode-project use-profiles --configuration Release
+      - |
+        xcodebuild \
+          -workspace App.xcworkspace \
+          -scheme App \
+          -configuration Release \
+          -destination 'generic/platform=iOS' \
+          -archivePath build/Kettle.xcarchive \
+          archive \
+          CODE_SIGN_STYLE=Manual \
+          DEVELOPMENT_TEAM=$CM_APP_STORE_CONNECT_ISSUER_ID
+    artifacts:
+      - ios/App/build/Kettle.xcarchive
+      - ios/App/build/**/Kettle*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true

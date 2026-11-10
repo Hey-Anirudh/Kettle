@@ -1,0 +1,15 @@
+{
+  "appId": "com.kettle.music",
+  "appName": "Kettle",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "backgroundColor": "#050505",
+  "android": {
+    "backgroundColor": "#050505",
+    "allowMixedContent": false
+  },
+  "ios": {
+    "backgroundColor": "#050505",
+    "contentInset": "automatic"
+  }
+}

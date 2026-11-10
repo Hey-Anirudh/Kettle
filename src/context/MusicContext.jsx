@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE, LOCAL_API, WS_BASE } from '../config';
+import { API_BASE, MEDIA_API, WS_BASE, IS_NATIVE } from '../config';
 
 const MusicContext = createContext();
 
@@ -34,6 +34,10 @@ export const MusicProvider = ({ children }) => {
   
   const audioRef = useRef(null);
   if (!audioRef.current) audioRef.current = new Audio(); // allocate once, not per render
+  // Native builds: YouTube iframe player (the official, sanctioned embed)
+  const ytMountRef = useRef(null);
+  const ytPlayerRef = useRef(null);
+  const handleEndedRef = useRef(null);
   const queueRef = useRef(queue);
   const currentTrackRef = useRef(currentTrack);
   const repeatRef = useRef(repeat);
@@ -82,25 +86,34 @@ export const MusicProvider = ({ children }) => {
   }, []);
 
   useEffect(() => {
+    if (IS_NATIVE) {
+      try { ytPlayerRef.current?.setVolume(Math.round(volume * 100)); } catch {}
+      return;
+    }
     const audio = audioRef.current;
     audio.volume = volume;
   }, [volume]);
 
   useEffect(() => {
     const audio = audioRef.current;
-    
     const updateProgress = () => setProgress(audio.currentTime);
     // Number.isFinite guards against Infinity (streams without duration
     // metadata would render "Infinity:NaN" and break click-to-seek)
     const updateDuration = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const handleEnded = () => {
       if (repeatRef.current === 'one') {
+        if (IS_NATIVE) {
+          const p = ytPlayerRef.current;
+          try { p?.seekTo(0, true); p?.playVideo(); } catch {}
+          return;
+        }
         audio.currentTime = 0;
         audio.play().catch(() => {});
       } else {
         handleNextTrack();
       }
     };
+    handleEndedRef.current = handleEnded;
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
 
@@ -117,6 +130,66 @@ export const MusicProvider = ({ children }) => {
       audio.removeEventListener('play', handlePlay);
       audio.removeEventListener('pause', handlePause);
     };
+  }, []);
+
+  // Native: lazily inject the IFrame API script; create the player on first use
+  const ensureYouTubePlayer = useCallback(() => new Promise((resolve, reject) => {
+    if (ytPlayerRef.current) { resolve(ytPlayerRef.current); return; }
+    if (!ytMountRef.current) { reject(new Error('YouTube mount missing')); return; }
+    const create = () => {
+      try {
+        const target = document.createElement('div');
+        ytMountRef.current.appendChild(target);
+        ytPlayerRef.current = new window.YT.Player(target, {
+          width: '100%',
+          height: '100%',
+          playerVars: {
+            autoplay: 1, playsinline: 1, rel: 0, modestbranding: 1,
+            controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3,
+          },
+          events: {
+            onReady: (e) => {
+              try {
+                const d = e.target.getDuration();
+                if (Number.isFinite(d) && d > 0) setDuration(d);
+              } catch {}
+              resolve(ytPlayerRef.current);
+            },
+            onStateChange: (e) => {
+              const S = window.YT && window.YT.PlayerState;
+              if (S && e.data === S.PLAYING) setIsPlaying(true);
+              else if (S && e.data === S.PAUSED) setIsPlaying(false);
+              else if (S && e.data === S.ENDED) handleEndedRef.current?.();
+            },
+            onError: () => { setIsScraping(false); setIsPlaying(false); },
+          },
+        });
+      } catch (err) { reject(err); }
+    };
+    if (window.YT && window.YT.Player) { create(); return; }
+    window.onYouTubeIframeAPIReady = create;
+    if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      const s = document.createElement('script');
+      s.src = 'https://www.youtube.com/iframe_api';
+      s.onerror = () => reject(new Error('iframe_api failed to load'));
+      document.head.appendChild(s);
+    }
+  }), []);
+
+  // Native: poll progress/duration (the iframe exposes no timeupdate events)
+  useEffect(() => {
+    if (!IS_NATIVE) return;
+    const id = setInterval(() => {
+      const p = ytPlayerRef.current;
+      if (!p || typeof p.getCurrentTime !== 'function') return;
+      try {
+        const t = p.getCurrentTime();
+        const d = p.getDuration();
+        if (Number.isFinite(t)) setProgress(t);
+        if (Number.isFinite(d) && d > 0) setDuration(d);
+      } catch {}
+    }, 500);
+    return () => clearInterval(id);
   }, []);
 
   // Restore profile state (volume/shuffle/repeat/queue) exactly once per
@@ -144,12 +217,16 @@ export const MusicProvider = ({ children }) => {
     if (state.track_id && !currentTrack && !restoredTrackRef.current) {
       restoredTrackRef.current = true;
       const track = user.current_queue?.find(t => t.id === state.track_id);
-      if (track) {
+      if (track && IS_NATIVE) {
+        // Native: display-only restore — the iframe loads when the user presses play
+        setCurrentTrack(track);
+        setProgress(state.progress || 0);
+      } else if (track) {
         setCurrentTrack(track);
         // Set progress but don't auto-play to avoid browser blocks
         const audio = audioRef.current;
         const resumeAt = state.progress || 0;
-        audio.src = `${LOCAL_API}/stream/${track.id}?title=${encodeURIComponent(track.title || '')}`;
+        audio.src = `${MEDIA_API}/stream/${track.id}?title=${encodeURIComponent(track.title || '')}`;
         setProgress(resumeAt);
         const seekWhenReady = () => {
           try { audio.currentTime = resumeAt; } catch { /* stream rejected seek */ }
@@ -162,12 +239,19 @@ export const MusicProvider = ({ children }) => {
 
   // PERSISTENCE: Sync state to backend
   const syncTimerRef = useRef(null);
+  const getPlaybackTime = useCallback(() => {
+    if (IS_NATIVE) {
+      try { return ytPlayerRef.current?.getCurrentTime?.() ?? progressRef.current; } catch { return progressRef.current; }
+    }
+    return audioRef.current.currentTime;
+  }, []);
+
   const syncState = useCallback(async () => {
     if (!user) return;
     try {
       const state = {
         track_id: currentTrackRef.current?.id,
-        progress: audioRef.current.currentTime,
+        progress: getPlaybackTime(),
         volume: audioRef.current.volume,
         shuffle: shuffleRef.current,
         repeat: repeatRef.current,
@@ -189,7 +273,7 @@ export const MusicProvider = ({ children }) => {
     } catch (e) {
       console.error("Sync failed:", e);
     }
-  }, [user, isPlaying]);
+  }, [user, isPlaying, getPlaybackTime]);
 
   useEffect(() => {
     if (!user) return;
@@ -207,7 +291,7 @@ export const MusicProvider = ({ children }) => {
     if (!track) return;
     try {
       const res = await fetch(
-        `${LOCAL_API}/recommendations?title=${encodeURIComponent(track.title)}&channel=${encodeURIComponent(track.channel || '')}&current_id=${track.id}`
+        `${MEDIA_API}/recommendations?title=${encodeURIComponent(track.title)}&channel=${encodeURIComponent(track.channel || '')}&current_id=${track.id}`
       );
       const data = await res.json();
       if (data.results?.length > 0) {
@@ -216,7 +300,7 @@ export const MusicProvider = ({ children }) => {
         const pick = pool[Math.floor(Math.random() * Math.min(5, pool.length))];
         upNextRef.current = { forId: track.id, pick, pool };
         // Warm the backend's stream-URL cache for the pick
-        fetch(`${LOCAL_API}/prefetch/${pick.id}`).catch(() => {});
+        fetch(`${MEDIA_API}/prefetch/${pick.id}`).catch(() => {});
       }
     } catch (e) {
       // Best-effort: handleNextTrack re-fetches on demand if this failed
@@ -236,7 +320,7 @@ export const MusicProvider = ({ children }) => {
       // Warm the NEXT queued track so the queue advances instantly
       const idx = queueList.findIndex(t => t.id === track.id);
       const nextUp = idx >= 0 ? (queueList[idx + 1] || (repeatRef.current === 'all' ? queueList[0] : null)) : null;
-      if (nextUp && nextUp.id !== track.id) fetch(`${LOCAL_API}/prefetch/${nextUp.id}`).catch(() => {});
+      if (nextUp && nextUp.id !== track.id) fetch(`${MEDIA_API}/prefetch/${nextUp.id}`).catch(() => {});
     }
 
     // Add to recent list
@@ -265,14 +349,37 @@ export const MusicProvider = ({ children }) => {
       }).catch(() => {});
     }
 
-    const streamUrl = `${LOCAL_API}/stream-live/${track.id}`;
-    const audio = audioRef.current;
-
     const onPlayStart = () => {
       setIsScraping(false);
       setIsPlaying(true);
       prepareNext(track); // fire-and-forget: precompute the next track
     };
+
+    if (IS_NATIVE) {
+      // Mobile: play through the official YouTube iframe — no local backend needed.
+      // Jam sync still works: the same SYNC_PLAY message carries the video id.
+      try {
+        const player = await ensureYouTubePlayer();
+        const resumeAt = startTime || 0;
+        if (resumeAt > 0) {
+          player.loadVideoById({ videoId: track.id, startSeconds: resumeAt });
+        } else {
+          player.loadVideoById(track.id);
+        }
+        setProgress(resumeAt);
+        onPlayStart();
+        if (!fromRemote && !isSyncingRef.current) {
+          broadcastRoomState('SYNC_PLAY', { track, progress: resumeAt, sentAt: Date.now() });
+        }
+      } catch (e) {
+        console.error('YouTube player failed to start', e);
+        setIsScraping(false);
+      }
+      return;
+    }
+
+    const streamUrl = `${MEDIA_API}/stream-live/${track.id}`;
+    const audio = audioRef.current;
 
     audio.src = streamUrl;
     if (startTime > 0) {
@@ -292,7 +399,7 @@ export const MusicProvider = ({ children }) => {
       if (!fromRemote && !isSyncingRef.current) broadcastRoomState('SYNC_PLAY', { track, progress: audio.currentTime, sentAt: Date.now() });
     } catch (err) {
       console.warn("Live stream failed, trying fallback...", err);
-      audio.src = `${LOCAL_API}/stream/${track.id}?title=${encodeURIComponent(track.title)}`;
+      audio.src = `${MEDIA_API}/stream/${track.id}?title=${encodeURIComponent(track.title)}`;
       if (startTime > 0) audio.currentTime = startTime; // re-apply seek lost by the src switch
       try {
         await audio.play();
@@ -307,6 +414,29 @@ export const MusicProvider = ({ children }) => {
   }, [broadcastRoomState, prepareNext]);
 
   const togglePlay = useCallback(() => {
+    if (IS_NATIVE) {
+      const p = ytPlayerRef.current;
+      if (!p || typeof p.getPlayerState !== 'function') return;
+      const playing = p.getPlayerState() === 1; // 1 = playing
+      try {
+        if (playing) {
+          p.pauseVideo();
+          setIsPlaying(false);
+          if (!isSyncingRef.current) broadcastRoomState('SYNC_PAUSE', { sentAt: Date.now() });
+        } else {
+          p.playVideo();
+          setIsPlaying(true);
+          if (!isSyncingRef.current) {
+            broadcastRoomState('SYNC_PLAY', {
+              track: currentTrackRef.current,
+              progress: p.getCurrentTime?.() || 0,
+              sentAt: Date.now(),
+            });
+          }
+        }
+      } catch {}
+      return;
+    }
     const audio = audioRef.current;
     if (!audio.src) return;
     if (audio.paused) {
@@ -359,7 +489,7 @@ export const MusicProvider = ({ children }) => {
     // Fallback: fetch recommendations now based on current song's vibe
     try {
       const res = await fetch(
-        `${LOCAL_API}/recommendations?title=${encodeURIComponent(ct.title)}&channel=${encodeURIComponent(ct.channel)}&current_id=${ct.id}`
+        `${MEDIA_API}/recommendations?title=${encodeURIComponent(ct.title)}&channel=${encodeURIComponent(ct.channel)}&current_id=${ct.id}`
       );
       const data = await res.json();
       if (data.results?.length > 0) {
@@ -387,12 +517,14 @@ export const MusicProvider = ({ children }) => {
   }, [playTrack]);
 
   const prevTrack = useCallback(() => {
-    const audio = audioRef.current;
+    const playbackTime = getPlaybackTime();
+    const restart = () => {
+      if (IS_NATIVE) { try { ytPlayerRef.current?.seekTo(0, true); } catch {} }
+      else { audioRef.current.currentTime = 0; }
+      setProgress(0);
+    };
     // If more than 3 seconds in, restart current track
-    if (audio.currentTime > 3) {
-      audio.currentTime = 0;
-      return;
-    }
+    if (playbackTime > 3) { restart(); return; }
     const q = queueRef.current;
     const ct = currentTrackRef.current;
     if (q.length > 0 && ct) {
@@ -400,14 +532,20 @@ export const MusicProvider = ({ children }) => {
       if (currentIndex > 0) {
         playTrack(q[currentIndex - 1], q);
       } else {
-        audio.currentTime = 0;
+        restart();
       }
     } else {
-      audio.currentTime = 0;
+      restart();
     }
-  }, [playTrack]);
+  }, [playTrack, getPlaybackTime]);
 
   const seek = useCallback((time) => {
+    if (IS_NATIVE) {
+      try { ytPlayerRef.current?.seekTo(time, true); } catch {}
+      setProgress(time);
+      if (!isSyncingRef.current) broadcastRoomState('SYNC_SEEK', { progress: time, sentAt: Date.now() });
+      return;
+    }
     audioRef.current.currentTime = time;
     setProgress(time);
     if (!isSyncingRef.current) broadcastRoomState('SYNC_SEEK', { progress: time, sentAt: Date.now() });
@@ -415,6 +553,11 @@ export const MusicProvider = ({ children }) => {
 
   const setVolume = useCallback((v) => {
     const clamped = Math.max(0, Math.min(1, v));
+    if (IS_NATIVE) {
+      try { ytPlayerRef.current?.setVolume(Math.round(clamped * 100)); } catch {}
+      setVolumeState(clamped);
+      return;
+    }
     audioRef.current.volume = clamped;
     setVolumeState(clamped);
   }, []);
@@ -485,10 +628,13 @@ export const MusicProvider = ({ children }) => {
         case 'USER_JOIN':
           setRoomParticipants(prev => [...new Set([...prev, msg.username])]);
           // If I am host AND the room is actually playing, hand the new joiner the state
-          if (isHost && currentTrackRef.current && !audioRef.current.paused) {
+          const roomLive = IS_NATIVE
+            ? ytPlayerRef.current?.getPlayerState?.() === 1
+            : !audioRef.current.paused;
+          if (isHost && currentTrackRef.current && roomLive) {
             broadcastRoomState('SYNC_PLAY', {
               track: currentTrackRef.current,
-              progress: audioRef.current.currentTime,
+              progress: getPlaybackTime(),
               sentAt: Date.now(),
             });
           }
@@ -498,6 +644,21 @@ export const MusicProvider = ({ children }) => {
           break;
         case 'SYNC_PLAY':
           if (!msg.track || !msg.track.id) break; // malformed peer message
+          if (IS_NATIVE) {
+            const targetTime = msg.progress + (msg.sentAt ? (Date.now() - msg.sentAt) / 1000 : 0);
+            isSyncingRef.current = true;
+            const isDifferentTrack = currentTrackRef.current?.id !== msg.track.id;
+            const p = ytPlayerRef.current;
+            if (isDifferentTrack) {
+              playTrack(msg.track, null, targetTime, true); // fromRemote: no echo
+            } else if (p) {
+              const drift = Math.abs((p.getCurrentTime?.() || 0) - targetTime);
+              if (drift > 2) { try { p.seekTo(targetTime, true); } catch {} }
+              try { p.playVideo(); setIsPlaying(true); } catch {}
+            }
+            setTimeout(() => { isSyncingRef.current = false; }, 200);
+            break;
+          }
           const now = Date.now();
           const latency = msg.sentAt ? (now - msg.sentAt) / 1000 : 0;
           const targetTime = msg.progress + latency;
@@ -523,17 +684,29 @@ export const MusicProvider = ({ children }) => {
           break;
         case 'SYNC_PAUSE':
           isSyncingRef.current = true;
-          audioRef.current.pause();
+          if (IS_NATIVE) {
+            try { ytPlayerRef.current?.pauseVideo(); setIsPlaying(false); } catch {}
+          } else {
+            audioRef.current.pause();
+          }
           setTimeout(() => { isSyncingRef.current = false; }, 200);
           break;
         case 'SYNC_SEEK':
           const seekNow = Date.now();
           const seekLatency = msg.sentAt ? (seekNow - msg.sentAt) / 1000 : 0;
           const seekTarget = msg.progress + seekLatency;
-          
           isSyncingRef.current = true;
+          if (IS_NATIVE) {
+            const p = ytPlayerRef.current;
+            try {
+              const cur = p?.getCurrentTime?.() || 0;
+              if (Math.abs(cur - seekTarget) > 1.5) p?.seekTo(seekTarget, true);
+            } catch {}
+            setTimeout(() => { isSyncingRef.current = false; }, 200);
+            break;
+          }
           const seekDrift = Math.abs(audioRef.current.currentTime - seekTarget);
-          
+
           if (seekDrift > 1.5) {
             audioRef.current.currentTime = seekTarget;
           }
@@ -559,7 +732,7 @@ export const MusicProvider = ({ children }) => {
     };
 
     setCurrentRoom(roomCode);
-  }, [playTrack, user, isRoomHost, broadcastRoomState]);
+  }, [playTrack, user, isRoomHost, broadcastRoomState, getPlaybackTime]);
 
   const updateRoomSettings = useCallback((newSettings) => {
     const updated = { ...roomSettings, ...newSettings };
@@ -687,6 +860,14 @@ export const MusicProvider = ({ children }) => {
       // Idempotent handlers: an explicit OS "play" must never pause and
       // vice versa (togglePlay breaks when events arrive out of order)
       navigator.mediaSession.setActionHandler('play', () => {
+        if (IS_NATIVE) {
+          try { ytPlayerRef.current?.playVideo(); } catch {}
+          setIsPlaying(true);
+          if (!isSyncingRef.current && currentTrackRef.current) {
+            broadcastRoomState('SYNC_PLAY', { track: currentTrackRef.current, progress: ytPlayerRef.current?.getCurrentTime?.() || 0, sentAt: Date.now() });
+          }
+          return;
+        }
         const a = audioRef.current;
         if (a && a.paused) {
           a.play().catch(() => {});
@@ -696,6 +877,14 @@ export const MusicProvider = ({ children }) => {
         }
       });
       navigator.mediaSession.setActionHandler('pause', () => {
+        if (IS_NATIVE) {
+          try { ytPlayerRef.current?.pauseVideo(); } catch {}
+          setIsPlaying(false);
+          if (!isSyncingRef.current && currentTrackRef.current) {
+            broadcastRoomState('SYNC_PAUSE', { sentAt: Date.now() });
+          }
+          return;
+        }
         audioRef.current?.pause();
         if (!isSyncingRef.current && currentTrackRef.current) {
           broadcastRoomState('SYNC_PAUSE', { sentAt: Date.now() });
@@ -721,5 +910,11 @@ export const MusicProvider = ({ children }) => {
     audioRef
   };
 
-  return <MusicContext.Provider value={value}>{children}</MusicContext.Provider>;
+  // Native hosts mount the YouTube iframe here; desktop renders nothing.
+  return (
+    <MusicContext.Provider value={value}>
+      {IS_NATIVE && <div ref={ytMountRef} className="yt-player-mount" aria-hidden="true" />}
+      {children}
+    </MusicContext.Provider>
+  );
 };

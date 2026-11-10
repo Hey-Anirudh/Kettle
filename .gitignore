@@ -50,3 +50,15 @@ venv/
 *.sln
 *.sw?
 backend/build/
+
+android/app/build/
+android/.gradle/
+android/local.properties
+android/captures/
+ios/App/build/
+ios/App/Pods/
+*.keystore
+!*.keystore.example
+
+android/app/src/main/assets/public/
+ios/App/App/public/

@@ -1,92 +1,99 @@
 {
-  "name": "kettle",
-  "private": true,
-  "version": "1.2.3",
-  "author": "Anirudh",
-  "description": "Premium music streaming platform",
-  "type": "module",
-  "main": "main.cjs",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "electron:dev": "electron .",
-    "electron:build": "vite build && electron-builder",
-    "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make"
-  },
-  "build": {
-    "appId": "com.kettle.music",
-    "productName": "Kettle",
-    "icon": "icon.ico",
-    "directories": {
-      "output": "build_release"
-    },
-    "files": [
-      "dist/**/*",
-      "main.cjs",
-      "preload.cjs",
-      "package.json",
-      "icon.ico"
-    ],
-    "extraResources": [
-      {
-        "from": "backend/dist/backend.exe",
-        "to": "backend.exe"
-      }
-    ],
-    "win": {
-      "target": "nsis",
-      "icon": "icon.ico"
-    },
-    "forceCodeSigning": false,
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerIcon": "icon.ico",
-      "uninstallerIcon": "icon.ico",
-      "shortcutName": "Kettle",
-      "installerSidebar": "wizardSidebar.bmp",
-      "installerHeader": "wizardHeader.bmp",
-      "include": "installer.nsh"
-    },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "Hey-Anirudh",
-        "repo": "Kettle-Music"
-      }
-    ]
-  },
-  "devDependencies": {
-    "@electron-forge/cli": "^7.11.1",
-    "@electron-forge/maker-deb": "^7.11.1",
-    "@electron-forge/maker-rpm": "^7.11.1",
-    "@electron-forge/maker-squirrel": "^7.11.1",
-    "@electron-forge/maker-zip": "^7.11.1",
-    "@electron-forge/plugin-auto-unpack-natives": "^7.11.1",
-    "@electron-forge/plugin-fuses": "^7.11.1",
-    "@electron/fuses": "^1.8.0",
-    "electron": "^41.5.0",
-    "electron-builder": "^26.8.1",
-    "electron-is-dev": "^3.0.1",
-    "electron-updater": "^6.8.3",
-    "typescript": "~6.0.2",
-    "vite": "^8.0.10"
-  },
-  "dependencies": {
-    "@vitejs/plugin-react-swc": "^4.3.0",
-    "axios": "^1.16.0",
-    "clsx": "^2.1.1",
-    "electron-is-dev": "^3.0.1",
-    "electron-squirrel-startup": "^1.0.1",
-    "electron-updater": "^6.3.9",
-    "framer-motion": "^12.38.0",
-    "hls.js": "^1.6.16",
-    "lucide-react": "^1.14.0",
-    "react": "^19.2.5",
-    "react-dom": "^19.2.5",
-    "tailwind-merge": "^3.5.0"
-  }
+    "name":  "kettle",
+    "private":  true,
+    "version":  "1.2.3",
+    "author":  "Anirudh",
+    "description":  "Premium music streaming platform",
+    "type":  "module",
+    "main":  "main.cjs",
+    "scripts":  {
+                    "dev":  "vite",
+                    "build":  "vite build",
+                    "preview":  "vite preview",
+                    "electron:dev":  "electron .",
+                    "electron:build":  "vite build \u0026\u0026 electron-builder",
+                    "start":  "electron-forge start",
+                    "package":  "electron-forge package",
+                    "make":  "electron-forge make",
+                    "cap:build":  "vite build \u0026\u0026 cap sync",
+                    "cap:android":  "vite build \u0026\u0026 cap sync android \u0026\u0026 cd android \u0026\u0026 gradlew.bat assembleDebug",
+                    "cap:sync":  "cap sync"
+                },
+    "build":  {
+                  "appId":  "com.kettle.music",
+                  "productName":  "Kettle",
+                  "icon":  "icon.ico",
+                  "directories":  {
+                                      "output":  "build_release"
+                                  },
+                  "files":  [
+                                "dist/**/*",
+                                "main.cjs",
+                                "preload.cjs",
+                                "package.json",
+                                "icon.ico"
+                            ],
+                  "extraResources":  [
+                                         {
+                                             "from":  "backend/dist/backend.exe",
+                                             "to":  "backend.exe"
+                                         }
+                                     ],
+                  "win":  {
+                              "target":  "nsis",
+                              "icon":  "icon.ico"
+                          },
+                  "forceCodeSigning":  false,
+                  "nsis":  {
+                               "oneClick":  false,
+                               "allowToChangeInstallationDirectory":  true,
+                               "installerIcon":  "icon.ico",
+                               "uninstallerIcon":  "icon.ico",
+                               "shortcutName":  "Kettle",
+                               "installerSidebar":  "wizardSidebar.bmp",
+                               "installerHeader":  "wizardHeader.bmp",
+                               "include":  "installer.nsh"
+                           },
+                  "publish":  [
+                                  {
+                                      "provider":  "github",
+                                      "owner":  "Hey-Anirudh",
+                                      "repo":  "Kettle-Music"
+                                  }
+                              ]
+              },
+    "devDependencies":  {
+                            "@electron-forge/cli":  "^7.11.1",
+                            "@electron-forge/maker-deb":  "^7.11.1",
+                            "@electron-forge/maker-rpm":  "^7.11.1",
+                            "@electron-forge/maker-squirrel":  "^7.11.1",
+                            "@electron-forge/maker-zip":  "^7.11.1",
+                            "@electron-forge/plugin-auto-unpack-natives":  "^7.11.1",
+                            "@electron-forge/plugin-fuses":  "^7.11.1",
+                            "@electron/fuses":  "^1.8.0",
+                            "electron":  "^41.5.0",
+                            "electron-builder":  "^26.8.1",
+                            "electron-is-dev":  "^3.0.1",
+                            "electron-updater":  "^6.8.3",
+                            "typescript":  "~6.0.2",
+                            "vite":  "^8.0.10"
+                        },
+    "dependencies":  {
+                         "@capacitor/android":  "^8.6.0",
+                         "@capacitor/cli":  "^8.6.0",
+                         "@capacitor/core":  "^8.6.0",
+                         "@capacitor/ios":  "^8.6.0",
+                         "@vitejs/plugin-react-swc":  "^4.3.0",
+                         "axios":  "^1.16.0",
+                         "clsx":  "^2.1.1",
+                         "electron-is-dev":  "^3.0.1",
+                         "electron-squirrel-startup":  "^1.0.1",
+                         "electron-updater":  "^6.3.9",
+                         "framer-motion":  "^12.38.0",
+                         "hls.js":  "^1.6.16",
+                         "lucide-react":  "^1.14.0",
+                         "react":  "^19.2.5",
+                         "react-dom":  "^19.2.5",
+                         "tailwind-merge":  "^3.5.0"
+                     }
 }

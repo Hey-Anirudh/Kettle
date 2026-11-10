@@ -11,7 +11,7 @@ import axios from 'axios';
 import logoMark from './assets/logo-mark.png';
 import { useMusic } from './context/MusicContext';
 import { motion, AnimatePresence } from 'framer-motion';
-import { API_BASE, LOCAL_API } from './config';
+import { API_BASE, MEDIA_API, IS_NATIVE } from './config';
 import './App.css';
 
 const ONBOARDING_GENRES = [
@@ -342,6 +342,9 @@ function App() {
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState("");
   const [joinCode, setJoinCode] = useState("");
+  // Native: whole-screen Friends overlay — the friend UI stays mounted in the
+  // aside (no state/focus churn) and CSS promotes it to a page on phones
+  const [mobileFriendsOpen, setMobileFriendsOpen] = useState(false);
   const [showAccountPanel, setShowAccountPanel] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editUsername, setEditUsername] = useState("");
@@ -803,7 +806,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       setIsHomeLoading(true);
 
       // Both requests fire at once — home renders as soon as the slower one lands
-      const searchTask = axios.get(`${LOCAL_API}/search?q=latest+trending+music+hits`)
+      const searchTask = axios.get(`${MEDIA_API}/search?q=latest+trending+music+hits`)
         .then(res => { setHomeResults(res.data.results); })
         .catch(e => console.error("Trending search failed", e));
 
@@ -852,10 +855,10 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       try {
         if (spec.recommend) {
           // Backend radio-mix: true vibe matching off one track
-          const r = await axios.get(`${LOCAL_API}/recommendations`, { params: spec.recommend });
+          const r = await axios.get(`${MEDIA_API}/recommendations`, { params: spec.recommend });
           return { ...spec, tracks: (r.data.results || []).slice(0, 12) };
         }
-        const r = await axios.get(`${LOCAL_API}/search?q=${encodeURIComponent(spec.query)}`);
+        const r = await axios.get(`${MEDIA_API}/search?q=${encodeURIComponent(spec.query)}`);
         return { ...spec, tracks: (r.data.results || []).slice(0, 12) };
       } catch { return { ...spec, tracks: [] }; }
     })).then(shelves => {
@@ -952,7 +955,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
       const reqId = ++searchReqIdRef.current; // identify THIS request
       searchTimerRef.current = setTimeout(async () => {
         try {
-          const res = await axios.get(`${LOCAL_API}/search?q=${encodeURIComponent(val)}`);
+          const res = await axios.get(`${MEDIA_API}/search?q=${encodeURIComponent(val)}`);
           // Only the newest request may write results/loading state
           if (reqId !== searchReqIdRef.current) return;
           setResults(res.data.results);
@@ -1007,7 +1010,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     try {
       if (p.query) {
         setIsLoading(true);
-        const res = await axios.get(`${LOCAL_API}/search?q=${encodeURIComponent(p.query)}`);
+        const res = await axios.get(`${MEDIA_API}/search?q=${encodeURIComponent(p.query)}`);
         setCurrentPlaylist({ ...p, songs: res.data.results });
       } else {
         const res = await axios.get(`${API_BASE}/playlists/${p.id}`);
@@ -1136,6 +1139,14 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     };
   }, [showVideo, isFullPlayer]);
 
+  // Native: tapping "Video" promotes the YouTube iframe (mounted by
+  // MusicContext) to fullscreen — it IS the native video layer.
+  useEffect(() => {
+    if (!IS_NATIVE) return undefined;
+    document.body.classList.toggle('yt-video-mode', !!(showVideo && isFullPlayer));
+    return () => { document.body.classList.remove('yt-video-mode'); };
+  }, [showVideo, isFullPlayer]);
+
   // Escape closes the full-screen player (YouTube Music / Apple Music behavior)
   useEffect(() => {
     if (!isFullPlayer) return undefined;
@@ -1182,7 +1193,7 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
   );
 
   return (
-    <div className={`app ${isFullPlayer ? 'player-expanded' : ''}`}>
+    <div className={`app ${isFullPlayer ? 'player-expanded' : ''} ${IS_NATIVE && mobileFriendsOpen ? 'mobile-friends-open' : ''}`}>
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-box">
@@ -1237,7 +1248,10 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         <div className="library-section friends-section">
           <div className="library-header">
             <span><User size={17} /> Friends{friends.length > 0 && <span className="friends-count">{friends.length}</span>}</span>
-            <button className="header-action" onClick={() => setIsAddingFriend(!isAddingFriend)} aria-label="Add a friend"><UserPlus size={17} /></button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <button className="header-action" onClick={() => setIsAddingFriend(!isAddingFriend)} aria-label="Add a friend"><UserPlus size={17} /></button>
+              {IS_NATIVE && <button className="header-action mobile-friends-close" onClick={() => setMobileFriendsOpen(false)} aria-label="Close friends"><X size={17} /></button>}
+            </div>
           </div>
           <div className="jam-section-body friends-body">
             {ownFriendCode && (
@@ -1587,6 +1601,18 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                     <Users size={64} color="var(--primary-accent)" />
                     <h2>Not in a Jam</h2>
                     <p>Join or create a session to listen together.</p>
+                    <form className="jam-join-box" style={{ marginTop: '18px', maxWidth: '320px', marginInline: 'auto' }} onSubmit={(e) => { e.preventDefault(); if (user && joinCode) joinRoom(joinCode.toUpperCase()); }}>
+                      <input
+                        type="text"
+                        placeholder={user ? "Enter room code..." : "Loading account..."}
+                        value={joinCode}
+                        onChange={e => setJoinCode(e.target.value.toUpperCase())}
+                        disabled={!user}
+                        maxLength={10}
+                        aria-label="Room code"
+                      />
+                      <button className="join-btn-mini" type="submit" disabled={!user || !joinCode}>Join</button>
+                    </form>
                     <button className="btn-primary" style={{ marginTop: '20px' }} onClick={() => setIsCreatingRoom(true)}>Create Session</button>
                   </div>
                 ) : (
@@ -1741,10 +1767,10 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
           {currentTrack ? (
             <>
               <div className="now-playing-art">
-                {showVideo && !isFullPlayer ? (
+                {showVideo && !isFullPlayer && !IS_NATIVE ? (
                   <video
                     ref={el => { videoRef.current = el; if (el) el.muted = true; }}
-                    src={`${LOCAL_API}/stream-video/${currentTrack.id}`}
+                    src={`${MEDIA_API}/stream-video/${currentTrack.id}`}
                     poster={currentTrack.thumbnail}
                     muted
                     playsInline
@@ -2227,6 +2253,17 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
         </div>
       </footer>
 
+      {/* NATIVE BOTTOM NAV — phones get app-style thumb navigation */}
+      {IS_NATIVE && (
+        <nav className="mobile-nav" aria-label="Main navigation">
+          <button className={`mobile-nav-item ${!mobileFriendsOpen && currentPage === 'home' ? 'active' : ''}`} onClick={() => { setMobileFriendsOpen(false); setCurrentPage('home'); }} aria-label="Home"><Home size={21} /><span>Home</span></button>
+          <button className={`mobile-nav-item ${!mobileFriendsOpen && currentPage === 'search' ? 'active' : ''}`} onClick={() => { setMobileFriendsOpen(false); setCurrentPage('search'); }} aria-label="Search"><Search size={21} /><span>Search</span></button>
+          <button className={`mobile-nav-item ${!mobileFriendsOpen && currentPage === 'jam' ? 'active' : ''}`} onClick={() => { setMobileFriendsOpen(false); setCurrentPage('jam'); }} aria-label="Jam Session"><Users size={21} /><span>Jam</span></button>
+          <button className={`mobile-nav-item ${!mobileFriendsOpen && currentPage === 'library' ? 'active' : ''}`} onClick={() => { setMobileFriendsOpen(false); setCurrentPage('library'); }} aria-label="Library"><Library size={21} /><span>Library</span></button>
+          <button className={`mobile-nav-item ${mobileFriendsOpen ? 'active' : ''}`} onClick={() => setMobileFriendsOpen(v => !v)} aria-label="Friends"><User size={21} /><span>Friends</span></button>
+        </nav>
+      )}
+
       {/* FULL-SCREEN PLAYER — immersive: full-bleed video when video mode is on,
            otherwise a cinematic blurred-art stage. Nothing else renders behind it. */}
       <AnimatePresence>
@@ -2241,11 +2278,11 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
             transition={{ type: 'spring', damping: 32, stiffness: 280 }}
           >
             {/* Background layer */}
-            {showVideo ? (
+            {showVideo && !IS_NATIVE ? (
               <video
                 ref={el => { videoRef.current = el; if (el) el.muted = true; }}
                 className="fp-video"
-                src={`${LOCAL_API}/stream-video/${currentTrack.id}`}
+                src={`${MEDIA_API}/stream-video/${currentTrack.id}`}
                 poster={currentTrack.thumbnail}
                 muted
                 playsInline
