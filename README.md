@@ -1,4 +1,4 @@
-# Ã°Å¸Å½Âµ Redew Music Ã¢â‚¬â€ Premium Streaming Platform
+# Redew Music - Premium Streaming Platform
 
 <p align="center">
   <img src="public/icon.png" width="128" height="128" alt="Redew Logo">
@@ -10,23 +10,23 @@
 
 ---
 
-## Ã¢Å“Â¨ Overview
+## Overview
 
 **Redew** is a high-performance desktop music streaming application built for music enthusiasts who crave a minimalist yet powerful interface. Seamlessly integrating the vast library of YouTube with a premium, glassmorphic design, Redew provides an unparalleled listening experience.
 
-## Ã°Å¸Å¡â‚¬ Key Features
+## Key Features
 
-- Ã°Å¸Å½Â§ **High-Fidelity Streaming**: Integrated `hls.js` for adaptive, high-quality audio playback.
-- **Name-based accounts**: instant sign-in by name, synced to the shared cloud â€” library, friends and Jam sessions follow you to every device.
-- Ã°Å¸Å½Â¨ **Minimalist Aesthetics**: A sleek, dark-mode interface built with Tailwind CSS and Framer Motion.
-- Ã°Å¸â€Â **Smart Search**: Lightning-fast search engine powered by a custom Python backend.
-- Ã°Å¸â€œÂ¦ **Desktop Native**: Fully optimized for Windows with a native installer and system tray support.
+- **High-Fidelity Streaming**: Integrated `hls.js` for adaptive, high-quality audio playback.
+- **Name-based accounts**: instant sign-in by name, synced to the shared cloud - library, friends and Jam sessions follow you to every device.
+- **Minimalist Aesthetics**: A sleek, dark-mode interface built with Tailwind CSS and Framer Motion.
+- **Smart Search**: Lightning-fast search engine powered by a custom Python backend.
+- **Desktop Native**: Fully optimized for Windows with a native installer and system tray support.
 
-## Ã°Å¸â€ºÂ Ã¯Â¸Â The Tech Stack (Peak Performance)
+## The Tech Stack (Peak Performance)
 
 Redew is forged using a modern, robust tech stack designed for speed, security, and beauty:
 
-### **Frontend & UI**
+### Frontend & UI
 - **[React 19](https://react.dev/)**: The core UI library for building a dynamic, component-based interface.
 - **[Vite 8](https://vitejs.dev/)**: The next-generation frontend tool for ultra-fast HMR and optimized builds.
 - **[Electron.js](https://www.electronjs.org/)**: Bringing the power of web technologies to the desktop.
@@ -34,22 +34,22 @@ Redew is forged using a modern, robust tech stack designed for speed, security, 
 - **[Tailwind CSS](https://tailwindcss.com/)**: A utility-first CSS framework for a highly customizable and modern design system.
 - **[Lucide React](https://lucide.dev/)**: Beautiful, consistent iconography.
 
-### **Backend & Engine**
+### Backend & Engine
 - **[Python](https://www.python.org/)**: Powering the core music processing and metadata extraction engine.
 - **[SQLite](https://sqlite.org/)**: Lightweight, local database for lightning-fast history and favorites retrieval.
 - **[YouTube Music API](https://ytmusicapi.readthedocs.io/)**: Real-time access to millions of tracks.
 
-### **DevOps & Packaging**
+### DevOps & Packaging
 - **[Electron Forge](https://www.electronforge.io/)**: Professional packaging and distribution toolkit.
 - **[PyInstaller](https://pyinstaller.org/)**: Compiling the Python backend into a high-performance standalone executable.
 
-## Ã°Å¸â€œÂ¥ Installation
+## Installation
 
-  1. Download the latest installer: **[Kettle-1.2-Installer.exe](./Kettle-1.2-Installer.exe)**
+1. Download the latest installer: **[Kettle-1.2-Installer.exe](./Kettle-1.2-Installer.exe)**
 2. Run the installer and follow the setup wizard.
 3. Launch Redew from your desktop or start menu and start streaming!
 
-## Ã°Å¸â€˜Â©Ã¢â‚¬ÂÃ°Å¸â€™Â» For Developers
+## For Developers
 
 If you want to run the project from source:
 
@@ -87,5 +87,5 @@ If you want to run the project from source:
 ---
 
 <p align="center">
-  Built with Ã¢ÂÂ¤Ã¯Â¸Â by <b>Anirudh</b>
+  Built with love by <b>Anirudh</b>
 </p>
