@@ -1058,14 +1058,17 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     return `${min}:${sec.toString().padStart(2, '0')}`;
   };
 
+  const getClientX = (e) => (e.touches && e.touches[0] ? e.touches[0].clientX : e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientX : e.clientX);
+
   const handleProgressClick = (e) => {
-    // Skip the redundant seek immediately after a drag-end (already applied on mouseup)
+    // Skip the redundant seek immediately after a drag-end (already applied on mouseup/touchend)
     if (isDragging || (dragEndedAtRef.current && Date.now() - dragEndedAtRef.current < 250)) return;
     const bar = progressBarRef.current;
     if (!bar) return;
     const rect = bar.getBoundingClientRect();
-    const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    seek(p * duration);
+    const clientX = getClientX(e);
+    const p = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    seek(p * (duration || 0));
   };
 
   const handleDragStart = (e) => {
@@ -1077,30 +1080,38 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
     const bar = progressBarRef.current;
     if (!bar) return;
     const rect = bar.getBoundingClientRect();
-    const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    setDragProgress(p * duration);
+    const clientX = getClientX(e);
+    if (clientX == null) return;
+    const p = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    setDragProgress(p * (duration || 0));
   };
 
   useEffect(() => {
     if (isDragging) {
-      const handleMouseMove = (e) => updateDrag(e);
-      const handleMouseUp = (e) => {
+      const handleMove = (e) => updateDrag(e);
+      const handleEnd = (e) => {
         updateDrag(e);
         dragEndedAtRef.current = Date.now();
         setIsDragging(false);
-        // Extracting p from updateDrag logic for final seek
         const bar = progressBarRef.current;
-        if (bar) {
+        const clientX = getClientX(e);
+        if (bar && clientX != null) {
           const rect = bar.getBoundingClientRect();
-          const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-          seek(p * duration);
+          const p = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+          seek(p * (duration || 0));
         }
       };
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleEnd);
+      window.addEventListener('touchmove', handleMove, { passive: false });
+      window.addEventListener('touchend', handleEnd);
+      window.addEventListener('touchcancel', handleEnd);
       return () => {
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleEnd);
+        window.removeEventListener('touchmove', handleMove);
+        window.removeEventListener('touchend', handleEnd);
+        window.removeEventListener('touchcancel', handleEnd);
       };
     }
   }, [isDragging, duration, seek]);
@@ -1141,9 +1152,12 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
 
   // Native: tapping "Video" promotes the YouTube iframe (mounted by
   // MusicContext) to fullscreen — it IS the native video layer.
+  // Native: promote the YouTube iframe to full-bleed when the user opens
+  // video mode in the fullscreen player. The iframe IS the video layer.
   useEffect(() => {
     if (!IS_NATIVE) return undefined;
-    document.body.classList.toggle('yt-video-mode', !!(showVideo && isFullPlayer));
+    const on = !!(showVideo && isFullPlayer);
+    document.body.classList.toggle('yt-video-mode', on);
     return () => { document.body.classList.remove('yt-video-mode'); };
   }, [showVideo, isFullPlayer]);
 
@@ -2289,9 +2303,9 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                 preload="metadata"
                 onError={() => setShowVideo(false)}
               />
-            ) : (
+            ) : !(IS_NATIVE && showVideo) ? (
               <div className="fp-backdrop" style={{ backgroundImage: `url(${currentTrack.thumbnail})` }} />
-            )}
+            ) : null}
             <div className="fp-vignette" aria-hidden="true" />
 
             {/* Top bar */}
@@ -2329,7 +2343,14 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                     tabIndex={0}
                     onClick={(e) => {
                       const rect = e.currentTarget.getBoundingClientRect();
-                      const p = Math.max(0, Math.min(rect.width, e.clientX - rect.left)) / rect.width;
+                      const x = e.touches?.[0]?.clientX ?? e.changedTouches?.[0]?.clientX ?? e.clientX;
+                      const p = Math.max(0, Math.min(rect.width, x - rect.left)) / rect.width;
+                      seek(p * (duration || 0));
+                    }}
+                    onTouchStart={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const x = e.touches?.[0]?.clientX ?? e.clientX;
+                      const p = Math.max(0, Math.min(rect.width, x - rect.left)) / rect.width;
                       seek(p * (duration || 0));
                     }}
                   >

@@ -31,6 +31,7 @@ export const MusicProvider = ({ children }) => {
   const [roomStatus, setRoomStatus] = useState('idle'); // idle | connecting | connected | error
   const wsRef = useRef(null);
   const isSyncingRef = useRef(false);
+  const lastSyncAtRef = useRef(0); // ignore stale/duplicate sync messages
   
   const audioRef = useRef(null);
   if (!audioRef.current) audioRef.current = new Audio(); // allocate once, not per render
@@ -80,8 +81,9 @@ export const MusicProvider = ({ children }) => {
   }, [user]);
 
   const broadcastRoomState = useCallback((type, data) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type, ...data }));
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type, ...data })); } catch {}
     }
   }, []);
 
@@ -595,6 +597,8 @@ export const MusicProvider = ({ children }) => {
   }, [fetchPlaylists]);
 
   const [isRoomHost, setIsRoomHost] = useState(false);
+  const isRoomHostRef = useRef(false);
+  useEffect(() => { isRoomHostRef.current = isRoomHost; }, [isRoomHost]);
 
   const joinRoom = useCallback(async (roomCode) => {
     if (wsRef.current) wsRef.current.close();
@@ -642,76 +646,75 @@ export const MusicProvider = ({ children }) => {
         case 'USER_LEAVE':
           setRoomParticipants(prev => prev.filter(u => u !== msg.username));
           break;
-        case 'SYNC_PLAY':
-          if (!msg.track || !msg.track.id) break; // malformed peer message
+        case 'SYNC_PLAY': {
+          if (!msg.track || !msg.track.id) break;
+          const sentAt = msg.sentAt || Date.now();
+          if (sentAt < lastSyncAtRef.current - 50) break; // stale/out-of-order
+          lastSyncAtRef.current = sentAt;
+          const transit = Math.max(0, Math.min(2.5, (Date.now() - sentAt) / 1000));
+          const targetTime = (msg.progress || 0) + transit;
+          const isDifferentTrack = currentTrackRef.current?.id !== msg.track.id;
+          const DRIFT = IS_NATIVE ? 0.6 : 0.35;
+          const HARD = 3.5;
+
+          isSyncingRef.current = true;
           if (IS_NATIVE) {
-            const targetTime = msg.progress + (msg.sentAt ? (Date.now() - msg.sentAt) / 1000 : 0);
-            isSyncingRef.current = true;
-            const isDifferentTrack = currentTrackRef.current?.id !== msg.track.id;
             const p = ytPlayerRef.current;
             if (isDifferentTrack) {
-              playTrack(msg.track, null, targetTime, true); // fromRemote: no echo
+              playTrack(msg.track, null, targetTime, true);
             } else if (p) {
-              const drift = Math.abs((p.getCurrentTime?.() || 0) - targetTime);
-              if (drift > 2) { try { p.seekTo(targetTime, true); } catch {} }
-              try { p.playVideo(); setIsPlaying(true); } catch {}
+              try {
+                const cur = p.getCurrentTime?.() || 0;
+                const drift = Math.abs(cur - targetTime);
+                if (drift > HARD || drift > DRIFT) p.seekTo(targetTime, true);
+                p.playVideo?.();
+                setIsPlaying(true);
+              } catch {}
             }
-            setTimeout(() => { isSyncingRef.current = false; }, 200);
-            break;
+          } else {
+            const audio = audioRef.current;
+            if (isDifferentTrack) {
+              playTrack(msg.track, null, targetTime, true);
+            } else {
+              const drift = Math.abs((audio.currentTime || 0) - targetTime);
+              if (drift > HARD || drift > DRIFT) {
+                try { audio.currentTime = targetTime; } catch {}
+              }
+              if (audio.paused) audio.play().catch(() => {});
+            }
           }
-          const now = Date.now();
-          const latency = msg.sentAt ? (now - msg.sentAt) / 1000 : 0;
-          const targetTime = msg.progress + latency;
-          
-          isSyncingRef.current = true;
-          
-          // Only sync if track is different OR time drift is > 2 seconds
-          const isDifferentTrack = currentTrackRef.current?.id !== msg.track.id;
-          const drift = Math.abs(audioRef.current.currentTime - targetTime);
-          
-          if (isDifferentTrack) {
-            playTrack(msg.track, null, targetTime, true); // fromRemote: no echo
-          } else if (drift > 2) {
-            audioRef.current.currentTime = targetTime;
-          }
-
-          // Only auto-play when the room is clearly live or this is a new track —
-          // never resume a locally paused player for the same song.
-          if (isDifferentTrack || !audioRef.current.paused) {
-            if (audioRef.current.paused) audioRef.current.play().catch(() => {});
-          }
-          setTimeout(() => { isSyncingRef.current = false; }, 200);
+          setTimeout(() => { isSyncingRef.current = false; }, 120);
           break;
-        case 'SYNC_PAUSE':
+        }
+        case 'SYNC_PAUSE': {
+          const sentAt = msg.sentAt || Date.now();
+          if (sentAt < lastSyncAtRef.current - 50) break;
+          lastSyncAtRef.current = sentAt;
           isSyncingRef.current = true;
           if (IS_NATIVE) {
             try { ytPlayerRef.current?.pauseVideo(); setIsPlaying(false); } catch {}
           } else {
             audioRef.current.pause();
           }
-          setTimeout(() => { isSyncingRef.current = false; }, 200);
+          setTimeout(() => { isSyncingRef.current = false; }, 120);
           break;
-        case 'SYNC_SEEK':
-          const seekNow = Date.now();
-          const seekLatency = msg.sentAt ? (seekNow - msg.sentAt) / 1000 : 0;
-          const seekTarget = msg.progress + seekLatency;
+        }
+        case 'SYNC_SEEK': {
+          const sentAt = msg.sentAt || Date.now();
+          if (sentAt < lastSyncAtRef.current - 50) break;
+          lastSyncAtRef.current = sentAt;
+          const transit = Math.max(0, Math.min(2.5, (Date.now() - sentAt) / 1000));
+          const target = (msg.progress || 0) + transit;
           isSyncingRef.current = true;
           if (IS_NATIVE) {
-            const p = ytPlayerRef.current;
-            try {
-              const cur = p?.getCurrentTime?.() || 0;
-              if (Math.abs(cur - seekTarget) > 1.5) p?.seekTo(seekTarget, true);
-            } catch {}
-            setTimeout(() => { isSyncingRef.current = false; }, 200);
-            break;
+            try { ytPlayerRef.current?.seekTo(target, true); setProgress(target); } catch {}
+          } else {
+            try { audioRef.current.currentTime = target; setProgress(target); } catch {}
           }
-          const seekDrift = Math.abs(audioRef.current.currentTime - seekTarget);
-
-          if (seekDrift > 1.5) {
-            audioRef.current.currentTime = seekTarget;
-          }
-          setTimeout(() => { isSyncingRef.current = false; }, 200);
+          setTimeout(() => { isSyncingRef.current = false; }, 120);
           break;
+        }
+
         case 'SYNC_SETTINGS':
           setRoomSettings(msg.settings);
           break;
@@ -748,6 +751,27 @@ export const MusicProvider = ({ children }) => {
     setIsRoomHost(false);
     setRoomStatus('idle');
   }, []);
+
+  // Host heartbeat: keep every member tightly in sync while the room is live
+  useEffect(() => {
+    if (!currentRoom) return undefined;
+    const id = setInterval(() => {
+      if (!isRoomHostRef.current) return;
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+      const track = currentTrackRef.current;
+      if (!track || !track.id) return;
+      const playing = IS_NATIVE
+        ? ytPlayerRef.current?.getPlayerState?.() === 1
+        : !audioRef.current.paused;
+      if (!playing) return;
+      broadcastRoomState('SYNC_PLAY', {
+        track,
+        progress: getPlaybackTime(),
+        sentAt: Date.now(),
+      });
+    }, 2000);
+    return () => clearInterval(id);
+  }, [currentRoom, broadcastRoomState, getPlaybackTime]);
 
   const addToPlaylist = useCallback(async (playlistId, track) => {
     const token = localStorage.getItem('token');
