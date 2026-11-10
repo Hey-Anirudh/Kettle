@@ -2208,10 +2208,17 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
 
       {/* Player Bar */}
       <footer className="player-bar">
-        <div className="pb-left">
+        <div
+          className="pb-left"
+          onClick={() => { if (currentTrack) setIsFullPlayer(true); }}
+          role={currentTrack ? 'button' : undefined}
+          tabIndex={currentTrack ? 0 : undefined}
+          onKeyDown={(e) => { if (currentTrack && (e.key === 'Enter' || e.key === ' ')) setIsFullPlayer(true); }}
+          style={{ cursor: currentTrack ? 'pointer' : 'default' }}
+        >
           {currentTrack && (
             <>
-              <img src={currentTrack.thumbnail} alt="" className="pb-art" onClick={() => setIsFullPlayer(true)} />
+              <img src={currentTrack.thumbnail} alt="" className="pb-art" />
               <div className="pb-info">
                 <p className="pb-title">{currentTrack.title.split('|')[0].trim()}</p>
                 <p className="pb-artist">{currentTrack.channel}</p>
@@ -2221,24 +2228,24 @@ const InitialsAvatar = memo(({ username, photo, size = 32 }) => (
                 className={`pb-like ${likedSongs.has(currentTrack.id) ? 'liked' : ''}`}
                 fill={likedSongs.has(currentTrack.id) ? '#1db954' : 'none'}
                 color={likedSongs.has(currentTrack.id) ? '#1db954' : 'currentColor'}
-                onClick={() => toggleLike(currentTrack)}
+                onClick={(e) => { e.stopPropagation(); toggleLike(currentTrack); }}
               />
             </>
           )}
         </div>
 
         <div className="pb-center">
-          <div className="pb-controls">
+          <div className="pb-controls" onClick={(e) => e.stopPropagation()}>
             <Shuffle size={16} className={`ctrl-icon ${shuffle ? 'active' : ''}`} onClick={() => setShuffle(!shuffle)} />
             <SkipBack size={20} fill="currentColor" className="ctrl-icon" onClick={prevTrack} />
-            <button className="play-btn" onClick={togglePlay}>
+            <button className="play-btn" onClick={(e) => { e.stopPropagation(); togglePlay(); }}>
               {isPlaying ? <Pause size={20} fill="black" color="black" /> : <Play size={20} fill="black" color="black" />}
             </button>
             <SkipForward size={20} fill="currentColor" className="ctrl-icon" onClick={nextTrack} />
             {repeat === 'one' ? <Repeat1 size={16} className="ctrl-icon active" onClick={() => setRepeat('none')} /> :
               <Repeat size={16} className={`ctrl-icon ${repeat !== 'none' ? 'active' : ''}`} onClick={() => setRepeat(repeat === 'none' ? 'all' : 'one')} />}
           </div>
-          <div className="pb-progress-wrap">
+          <div className="pb-progress-wrap" onClick={(e) => e.stopPropagation()}>
             <span className="pb-time">{formatTime(progress)}</span>
             <div className="progress-bar" ref={progressBarRef} onMouseDown={handleDragStart} onClick={handleProgressClick}>
               <div className="progress-fill" style={{ width: `${progressPercent}%` }}>
